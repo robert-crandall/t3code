@@ -26,7 +26,7 @@ fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 is_target_running() {
-  ps -ax -o command= | grep -Fq "/Applications/T3 Code (Beta).app/Contents/"
+  pgrep -f "/Applications/T3 Code \(Beta\)\.app/Contents/" >/dev/null 2>&1
 }
 
 if is_target_running; then

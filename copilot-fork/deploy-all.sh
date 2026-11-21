@@ -32,10 +32,11 @@ compute_next_version() {
   prefix="${major}.${minor}.${next_patch}-copilot.${today}."
   seq=1
   local existing_ubuntu
-  existing_ubuntu="$(ssh "$UBUNTU_HOST" 'cat ~/.t3/runtime/service-state.json 2>/dev/null || true')"
+  existing_ubuntu="$(ssh "$UBUNTU_HOST" 'ls -1 ~/.t3/runtime/versions 2>/dev/null; cat ~/.t3/runtime/service-state.json 2>/dev/null || true')"
   while true; do
     candidate="${prefix}${seq}"
-    if [[ "$existing_ubuntu" != *"\"$candidate\""* ]] &&
+    if ! grep -Fxq "$candidate" <<<"$existing_ubuntu" &&
+       [[ "$existing_ubuntu" != *"\"$candidate\""* ]] &&
        [[ "$(cat "$STATE_DIR/installed-mac-version" 2>/dev/null || true)" != "$candidate" ]] &&
        [[ "$(cat "$STATE_DIR/staged-version" 2>/dev/null || true)" != "$candidate" ]]; then
       echo "$candidate"
