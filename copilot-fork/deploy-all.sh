@@ -115,7 +115,7 @@ mkdir -p "$VERSIONS_DIR" "$HOME/.local/bin"
 rm -rf "$TMP_INSTALL" "$DEST_DIR"
 mkdir -p "$TMP_INSTALL"
 tar -xzf "$ARCHIVE" -C "$TMP_INSTALL" --strip-components=1
-touch "$TMP_INSTALL/.install-complete"
+printf '%s\n' "$VERSION" > "$TMP_INSTALL/.install-complete"
 mv "$TMP_INSTALL" "$DEST_DIR"
 
 printf '{"protocol":4,"activeVersion":"%s"}\n' "$VERSION" > "$HOME/.t3/runtime/service-state.json"
@@ -129,6 +129,7 @@ chmod +x "$HOME/.local/bin/t3"
 if [[ -f "$HOME/.config/systemd/user/t3code.service" ]]; then
   sed -i -E "s|^ExecStart=.*|ExecStart=$DEST_DIR/t3 __service-launcher|" "$HOME/.config/systemd/user/t3code.service"
   systemctl --user daemon-reload
+  systemctl --user reset-failed t3code.service || true
   systemctl --user restart t3code.service
   sleep 2
   systemctl --user is-active --quiet t3code.service
@@ -140,7 +141,7 @@ EOF_UBUNTU
 echo "[deploy-all] Step 2/4: Syncing prebuilt JS bundle + darwin-arm64 pnpm cache from $UBUNTU_HOST to Mac..."
 rsync -az --delete "${UBUNTU_HOST}:${UBUNTU_REPO}/apps/server/dist/" "$MAC_WORKTREE/apps/server/dist/"
 rsync -az --delete "${UBUNTU_HOST}:${UBUNTU_REPO}/apps/desktop/dist-electron/" "$MAC_WORKTREE/apps/desktop/dist-electron/"
-rsync -az "${UBUNTU_HOST}:${UBUNTU_MAC_PNPM_CACHE}/" "$MAC_PNPM_CACHE/"
+rsync -az --exclude='_tmp' "${UBUNTU_HOST}:${UBUNTU_MAC_PNPM_CACHE}/" "$MAC_PNPM_CACHE/"
 mkdir -p "$HOME/Library/Caches/pnpm"
 if [[ -f "$MAC_PNPM_CACHE/cache/lockfile-verified.jsonl" ]]; then
   cp "$MAC_PNPM_CACHE/cache/lockfile-verified.jsonl" "$HOME/Library/Caches/pnpm/lockfile-verified.jsonl"
