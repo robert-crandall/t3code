@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { AcpRequestError } from "effect-acp/errors";
 
@@ -61,7 +62,7 @@ export interface CopilotTextGenerationOptions {
   readonly authMethodId?: string;
   readonly resolveSpawn: (
     cwd: string,
-  ) => Effect.Effect<AcpSessionRuntime.AcpSpawnInput, AcpRegistryError>;
+  ) => Effect.Effect<AcpSessionRuntime.AcpSpawnInput, AcpRegistryError, Scope.Scope>;
 }
 
 export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(function* (
