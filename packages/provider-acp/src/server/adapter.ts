@@ -7105,7 +7105,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               // Replayed history feeds snapshots only; it must not drive live turn or wake state.
               if (sessionUpdateIsReplay(rawNotification)) {
                 yield* recordLoadedHistory(
-                  flavor.normalizeSessionUpdate?.(rawNotification) ?? rawNotification,
+                  flavor.normalizeSessionUpdate?.(rawNotification, sourceRuntime) ??
+                    rawNotification,
                   false,
                 );
                 return;
