@@ -4,6 +4,6 @@ This fork maintains a Copilot-optimized build of [pingdotgg/t3code](https://gith
 
 - **`main`** mirrors `pingdotgg/t3code:main` cleanly (`git merge --ff-only upstream/main`).
 - **`copilot-custom`** carries `upstream/main` plus vetted open Copilot/ACP pull requests tracked in [`patches.json`](./patches.json).
-- **`~/.local/bin/update-t3code`** syncs/builds/deploys `copilot-custom` to:
-  - **macOS (`darwin-arm64`)**: code-signed `T3 Code (Beta).app` (`Apple Development: robert.crandall@outlook.com (3G2LN5PQZN)`), staged safely when T3 Code is running and atomically swapped into `/Applications/T3 Code (Beta).app` once idle/exited.
-  - **Ubuntu (`ubuntu` / `192.168.16.15`, `linux-x64`)**: standalone `t3` runtime archive installed under `~/.t3/runtime/versions/<version>` with `t3 service install` updating `t3code.service` on port `3773`.
+- **Ubuntu (`whsfront` / `ubuntu`, `/home/robert/repos/t3code`)** is the primary registered T3 Code project workspace and handles all npm/pnpm registry resolution, typechecks, tests, JS bundle builds (`apps/server/dist` + `apps/desktop/dist-electron`), Linux `t3` runtime deployment (`t3code.service`), and `darwin-arm64` pnpm cache/store prewarming (`copilot-fork/prewarm-mac-stage.ts`).
+- **macOS (`darwin-arm64`)** syncs the prebuilt JS bundle and `darwin-arm64` pnpm cache/store over LAN from Ubuntu, builds `T3 Code (Beta).app` completely offline (`pnpm_config_offline=true`, bypassing local macOS npm/CFS restrictions), signs with `Apple Development` (`copilot-fork/sign-mac-app.mjs`), and atomically swaps `/Applications/T3 Code (Beta).app` once idle (`copilot-fork/swap-mac-app.sh`).
+- **`~/.local/bin/update-t3code`** invokes [`copilot-fork/deploy-all.sh`](./deploy-all.sh) to build and deploy both Ubuntu and macOS in lockstep with matching exact SemVer (`0.1.12-copilot.YYYYMMDD.N`).
