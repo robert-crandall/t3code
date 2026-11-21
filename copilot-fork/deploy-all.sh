@@ -160,7 +160,7 @@ export pnpm_config_cache_dir="$MAC_PNPM_CACHE/cache"
 export pnpm_config_store_dir="$MAC_PNPM_CACHE/store"
 export pnpm_config_offline="true"
 
-vp install --frozen-lockfile --offline
+vp install --frozen-lockfile --offline --ignore-scripts
 
 cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target aarch64-apple-darwin
 export T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR="true"

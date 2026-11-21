@@ -8,7 +8,7 @@ import * as NodePath from "node:path";
 const requireFromScripts = NodeModule.createRequire(
   new URL("../scripts/package.json", import.meta.url),
 );
-const { signAsync } = requireFromScripts("@electron/osx-sign");
+const { sign } = requireFromScripts("@electron/osx-sign");
 
 const cliArgs = process.argv.slice(2);
 const appPath = cliArgs[0];
@@ -60,14 +60,16 @@ try {
   NodeChildProcess.execFileSync("xattr", ["-cr", resolvedAppPath]);
 
   console.log(`[sign-mac-app] Signing ${resolvedAppPath} with "${identity}"...`);
-  await signAsync({
+  await sign({
     app: resolvedAppPath,
     identity,
-    hardenedRuntime: true,
-    entitlements: entitlementsPath,
-    entitlementsInherit: entitlementsPath,
     platform: "darwin",
     batchCodesignCalls: true,
+    optionsForFile: () => ({
+      entitlements: entitlementsPath,
+      hardenedRuntime: true,
+      timestamp: "none",
+    }),
   });
 
   console.log("[sign-mac-app] Verifying deep strict code signature...");
