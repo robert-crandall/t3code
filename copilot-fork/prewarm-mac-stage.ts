@@ -18,9 +18,7 @@ const NodeServices = await import(
 const Schema = await import(
   NodeURL.pathToFileURL(requireFromScripts.resolve("effect/Schema")).href
 );
-const { fromYaml } = await import(
-  NodeURL.pathToFileURL(requireFromScripts.resolve("@t3tools/shared/schemaYaml")).href
-);
+import { fromYaml } from "../packages/shared/src/schemaYaml.ts";
 
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
@@ -68,75 +66,11 @@ function runCmd(
   });
 }
 
-async function copyWorkspaceSkeleton(destRoot: string): Promise<void> {
-  await NodeFSP.mkdir(destRoot, { recursive: true });
-  for (const rel of ["package.json", "pnpm-lock.yaml", ".pnpmfile.cjs"]) {
-    await NodeFSP.copyFile(NodePath.join(repoRoot, rel), NodePath.join(destRoot, rel));
-  }
-  const rawWs = await NodeFSP.readFile(NodePath.join(repoRoot, "pnpm-workspace.yaml"), "utf8");
-  const darwinArchBlock = [
-    "",
-    "supportedArchitectures:",
-    "  os:",
-    "    - darwin",
-    "  cpu:",
-    "    - arm64",
-    "",
-  ].join("\n");
-  await NodeFSP.writeFile(
-    NodePath.join(destRoot, "pnpm-workspace.yaml"),
-    `${rawWs}\n${darwinArchBlock}`,
-    "utf8",
-  );
-
-  await NodeFSP.cp(NodePath.join(repoRoot, "patches"), NodePath.join(destRoot, "patches"), {
-    recursive: true,
-  });
-  const mobileDepsSrc = NodePath.join(repoRoot, "apps/mobile/deps");
-  try {
-    await NodeFSP.access(mobileDepsSrc);
-    await NodeFSP.mkdir(NodePath.join(destRoot, "apps/mobile"), { recursive: true });
-    await NodeFSP.cp(mobileDepsSrc, NodePath.join(destRoot, "apps/mobile/deps"), {
-      recursive: true,
-    });
-  } catch {
-    // ignore if absent
-  }
-
-  const dirsToScan = ["apps", "packages", "infra"];
-  for (const parent of dirsToScan) {
-    const absParent = NodePath.join(repoRoot, parent);
-    const entries = await NodeFSP.readdir(absParent, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const pkgPath = NodePath.join(absParent, entry.name, "package.json");
-      try {
-        await NodeFSP.access(pkgPath);
-        const destPkgDir = NodePath.join(destRoot, parent, entry.name);
-        await NodeFSP.mkdir(destPkgDir, { recursive: true });
-        await NodeFSP.copyFile(pkgPath, NodePath.join(destPkgDir, "package.json"));
-      } catch {
-        // ignore non-package directories
-      }
-    }
-  }
-
-  for (const singlePkg of ["evals", "oxlint-plugin-t3code", "scripts"]) {
-    const pkgPath = NodePath.join(repoRoot, singlePkg, "package.json");
-    try {
-      await NodeFSP.access(pkgPath);
-      const destPkgDir = NodePath.join(destRoot, singlePkg);
-      await NodeFSP.mkdir(destPkgDir, { recursive: true });
-      await NodeFSP.copyFile(pkgPath, NodePath.join(destPkgDir, "package.json"));
-    } catch {
-      // ignore
-    }
-  }
-}
-
 async function main(): Promise<void> {
+  const tmpParent = NodePath.join(cacheRoot, "_tmp");
   await NodeFSP.mkdir(cacheDir, { recursive: true });
   await NodeFSP.mkdir(storeDir, { recursive: true });
+  await NodeFSP.mkdir(tmpParent, { recursive: true });
 
   const pnpmEnv: NodeJS.ProcessEnv = {
     pnpm_config_cache_dir: cacheDir,
@@ -144,16 +78,29 @@ async function main(): Promise<void> {
     CI: "true",
   };
 
-  const wsTmp = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3code-mac-ws-prewarm-"));
-  const stageTmp = await NodeFSP.mkdtemp(
-    NodePath.join(NodeOS.tmpdir(), "t3code-mac-stage-prewarm-"),
-  );
+  const wsTmp = await NodeFSP.mkdtemp(NodePath.join(tmpParent, "ws-"));
+  const stageTmp = await NodeFSP.mkdtemp(NodePath.join(tmpParent, "stage-"));
 
   try {
     console.log(
       `[prewarm-mac-stage] 1/2 Prewarming darwin-arm64 workspace lockfile into ${cacheRoot}...`,
     );
-    await copyWorkspaceSkeleton(wsTmp);
+    await runCmd("git", ["worktree", "add", "--detach", "--force", wsTmp, "HEAD"], repoRoot, {});
+    const rawWs = await NodeFSP.readFile(NodePath.join(wsTmp, "pnpm-workspace.yaml"), "utf8");
+    const darwinArchBlock = [
+      "",
+      "supportedArchitectures:",
+      "  os:",
+      "    - darwin",
+      "  cpu:",
+      "    - arm64",
+      "",
+    ].join("\n");
+    await NodeFSP.writeFile(
+      NodePath.join(wsTmp, "pnpm-workspace.yaml"),
+      `${rawWs}\n${darwinArchBlock}`,
+      "utf8",
+    );
     await runCmd("vp", ["install", "--frozen-lockfile", "--ignore-scripts"], wsTmp, pnpmEnv);
 
     console.log(
@@ -232,6 +179,7 @@ async function main(): Promise<void> {
     await runCmd("vp", [...STAGE_INSTALL_ARGS, "--ignore-scripts"], stageTmp, pnpmEnv);
     console.log(`[prewarm-mac-stage] Done. darwin-arm64 cache & store ready at ${cacheRoot}`);
   } finally {
+    await runCmd("git", ["worktree", "remove", "--force", wsTmp], repoRoot, {}).catch(() => {});
     await NodeFSP.rm(wsTmp, { recursive: true, force: true }).catch(() => {});
     await NodeFSP.rm(stageTmp, { recursive: true, force: true }).catch(() => {});
   }
