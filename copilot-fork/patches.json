@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "upstreamRepo": "pingdotgg/t3code",
+  "forkRepo": "robert-crandall/t3code",
+  "integrationBranch": "copilot-custom",
+  "upstreamBaseBranch": "main",
+  "lastUpstreamMainSha": "fcf50973f3353cb401450c5cc6b4a177746150b7",
+  "patches": [
+    {
+      "pr": 36617,
+      "url": "https://github.com/pingdotgg/t3code/pull/36617",
+      "title": "fix(acp-registry): composer show reasoning effort picker; delegate_task can choose effort level",
+      "status": "integrated",
+      "reviewedHeadSha": "bfff893023bdc77b837edd1538f844bcaeaa532d",
+      "notes": "Cleanly enables reasoning effort picker in composer and delegate_task effort forwarding for Copilot ACP."
+    },
+    {
+      "pr": 34853,
+      "url": "https://github.com/pingdotgg/t3code/pull/34853",
+      "title": "fix(acp-registry): npx and uvx agents stay listed when npm or uv is missing",
+      "status": "integrated",
+      "reviewedHeadSha": "5734c77409aaeac9f2a3bedd7b3fe4dee077ecfd",
+      "notes": "Keeps npx/uvx registry agents listed when npm/uv is absent on PATH."
+    },
+    {
+      "pr": 32976,
+      "url": "https://github.com/pingdotgg/t3code/pull/32976",
+      "title": "feat(acp-registry): Copilot can generate thread titles and commit messages",
+      "status": "integrated",
+      "reviewedHeadSha": "f48cbf51a02bac15222dcf2c3b19e5b8ccad9984",
+      "notes": "Adds ProviderTextGeneration support via Copilot ACP for automatic thread titles and commit messages."
+    },
+    {
+      "pr": 37799,
+      "url": "https://github.com/pingdotgg/t3code/pull/37799",
+      "title": "fix(server): Copilot threads can call optional T3 tools again",
+      "status": "integrated",
+      "reviewedHeadSha": "6bb83837c5e273fcc224ee827bf7e9bd225a7b03",
+      "notes": "Replaces tool_search dynamic MCP capability swap with stable t3_help/t3_call gateway; adapted t3ToolSummary.ts to gt-i18n and added upstream issues/pull_requests/t3_submit_output tools to McpToolGroups.ts."
+    },
+    {
+      "pr": 39626,
+      "url": "https://github.com/pingdotgg/t3code/pull/39626",
+      "title": "fix(acp-registry): match registry-id basenames for copilot, kimi, and claude",
+      "status": "integrated",
+      "reviewedHeadSha": "ebab0f0304c12d9ec3075581cc47b0fe926377fd",
+      "notes": "Updated shared isCopilotAcpRegistrySettings in settings.ts for github-copilot-cli local binaries and extended Claude local command regex to match both claude-acp and claude-agent-acp."
+    },
+    {
+      "pr": 26438,
+      "url": "https://github.com/pingdotgg/t3code/pull/26438",
+      "title": "fix(acp): list Copilot skills in the skill menu",
+      "status": "integrated",
+      "reviewedHeadSha": "2070c0c4d2e4374bf8843bf5fcf1f3aa5e524c3a",
+      "notes": "Discovers personal/plugin/project Copilot skills and rewrites $skill mentions to /skill; preserved direct child skill folders named build/dist/vendor/coverage inside skills containers."
+    },
+    {
+      "pr": 32476,
+      "url": "https://github.com/pingdotgg/t3code/pull/32476",
+      "title": "fix(provider-acp): retire Copilot tasks when their runtime ends",
+      "status": "integrated",
+      "reviewedHeadSha": "06b2502faa8c2c1fea199aae2c80623302c8eac0",
+      "notes": "Scopes Copilot subagent attribution per runtime WeakMap and terminalizes runtime-owned subagents when the Copilot process exits; preserved Copilot 1.0.114+ agentId delta and toolIdentityByCallId routing."
+    },
+    {
+      "pr": 24740,
+      "url": "https://github.com/pingdotgg/t3code/pull/24740",
+      "title": "fix(acp): retain delivered instructions when reopening a conversation",
+      "status": "integrated",
+      "reviewedHeadSha": "8780330727bf25132d6aeec3d4ae8d650616947b",
+      "notes": "Persists SHA-256 instruction delivery digest in providerThread.nativeMetadata.acpInstructions across session reopen/restart and invalidates on compaction or rollback."
+    },
+    {
+      "pr": 30261,
+      "url": "https://github.com/pingdotgg/t3code/pull/30261",
+      "title": "fix(provider-acp-registry): recover when Copilot exits after a missing-session prompt",
+      "status": "skipped",
+      "reviewedHeadSha": "8f8b77fb415df710202e6b44f64e54a8b0a395e5",
+      "skipReason": "Maintainer requested changes: exitCode === 0 heuristic is too broad and can misclassify normal process exits as lost sessions."
+    },
+    {
+      "pr": 27665,
+      "url": "https://github.com/pingdotgg/t3code/pull/27665",
+      "title": "feat: add GitHub Copilot SDK provider",
+      "status": "skipped",
+      "reviewedHeadSha": "25baf2fb0518d839f210ae33b10a91ab6ad7f6b4",
+      "skipReason": "Large parallel SDK provider (~2k LOC) with unresolved review defects: duplicate streaming deltas, session leak on unregistration, and missing Windows binary handling."
+    }
+  ]
+}
