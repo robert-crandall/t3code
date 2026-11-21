@@ -9,7 +9,7 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { AcpRegistrySettings } from "../settings.ts";
+import { AcpRegistrySettings, isCopilotAcpRegistrySettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Clock from "effect/Clock";
@@ -65,6 +65,7 @@ import * as AcpRegistrySupport from "./AcpRegistrySupport.ts";
 import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.ts";
 import * as AcpRegistryAuth from "./auth.ts";
 import * as AcpRegistryAuthenticationState from "./authenticationState.ts";
+import { makeCopilotTextGeneration } from "./copilotTextGeneration.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const decodeSettings = Schema.decodeSync(AcpRegistrySettings);
@@ -142,7 +143,7 @@ const makeUnsupportedTextGeneration = (): ProviderTextGeneration => {
     Effect.fail(
       new TextGenerationError({
         operation,
-        detail: "ACP Registry instances do not provide application text generation.",
+        detail: "This ACP Registry agent does not provide application text generation.",
       }),
     );
   return {
@@ -310,7 +311,7 @@ function baseSnapshot(
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     ...(iconUrl ? { iconUrl } : {}),
     continuation: { groupKey: input.continuationKey },
-    supportsTextGeneration: false,
+    supportsTextGeneration: isCopilotAcpRegistrySettings(input.settings),
     enabled: input.settings.enabled,
     installed: input.installed,
     version: input.version,
@@ -1030,6 +1031,17 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
       ),
     };
 
+    const textGeneration = isCopilotAcpRegistrySettings(effectiveConfig)
+      ? yield* makeCopilotTextGeneration({
+          environment: processEnvironment,
+          ...(effectiveConfig.authMethodId ? { authMethodId: effectiveConfig.authMethodId } : {}),
+          resolveSpawn: (cwd) =>
+            catalog
+              .resolve(effectiveConfig, cwd, processEnvironment)
+              .pipe(Effect.map(({ spawn }) => spawn)),
+        })
+      : makeUnsupportedTextGeneration();
+
     return {
       instanceId,
       driverKind: DRIVER_KIND,
@@ -1050,7 +1062,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
         Effect.andThen(liveSnapshotSemaphore.withPermit(invalidateEnrichmentCache)),
       ),
       orchestrationAdapter,
-      textGeneration: makeUnsupportedTextGeneration(),
+      textGeneration,
       acpSessionManagement: {
         listSessions: ({ cwd, cursor }) =>
           provideAcpManagementServices(
