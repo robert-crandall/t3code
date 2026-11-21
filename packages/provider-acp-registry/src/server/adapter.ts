@@ -20,6 +20,11 @@ import {
   makeCopilotSubagentRouting,
 } from "./copilotAcp.ts";
 import { prefersHttpMcpTransport } from "./mcpTransport.ts";
+import {
+  discoverCopilotSkills,
+  hasCopilotSkillMention,
+  rewriteCopilotSkillMentions,
+} from "./copilotSkills.ts";
 import { defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
 import { AcpRegistrySettings, isCopilotAcpRegistrySettings } from "../settings.ts";
@@ -199,6 +204,8 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
   options: AcpRegistryAdapterV2Options,
 ) {
   const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const runtimeCoordinator = Option.getOrUndefined(
     yield* Effect.serviceOption(AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator),
   );
@@ -348,6 +355,16 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           registerExtensions: copilotRouting.registerExtensions,
           normalizeSessionUpdate: copilotRouting.normalizeSessionUpdate,
           extractSubagentUpdate: extractCopilotSubagentUpdate,
+          rewriteUserText: (text, turnInput) => {
+            if (!hasCopilotSkillMention(text)) return Effect.succeed(text);
+            return discoverCopilotSkills(turnInput.runtimePolicy.cwd, options.environment).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+              Effect.map((skills) =>
+                rewriteCopilotSkillMentions(text, new Set(skills.map((skill) => skill.name))),
+              ),
+            );
+          },
           restartRuntimeAfterPromptError: isCopilotLostSessionError,
           // A finished background agent wakes the root after assistant.idle settled the run.
           enablePostSettleContinuation: true,
@@ -359,11 +376,24 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(runtimeCoordinator === undefined
       ? {}
       : {
+          // The command catalog is shared by every project on this instance, so it lists only
+          // personal skills; project skills stay slash commands, as other projects lack them.
           onAvailableCommandsUpdate: (commands) =>
-            runtimeCoordinator.publishAvailableCommands(
-              options.instanceId,
-              normalizeAcpRegistryCommands(commands),
-            ),
+            isCopilot
+              ? discoverCopilotSkills(undefined, options.environment).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                  Effect.flatMap((knownSkills) =>
+                    runtimeCoordinator.publishAvailableCommands(
+                      options.instanceId,
+                      normalizeAcpRegistryCommands(commands, knownSkills),
+                    ),
+                  ),
+                )
+              : runtimeCoordinator.publishAvailableCommands(
+                  options.instanceId,
+                  normalizeAcpRegistryCommands(commands),
+                ),
           // A new Copilot session starts at its own effort, not the one the composer shows.
           ...(isCopilot
             ? {
