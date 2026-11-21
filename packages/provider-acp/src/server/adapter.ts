@@ -48,6 +48,7 @@ import {
 import { FILE_HEADERS_ONLY, formatPatch, structuredPatch } from "diff";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -56,6 +57,7 @@ import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Hex from "effect/encoding/Hex";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -1650,6 +1652,11 @@ interface AcpNativeBuildConfiguration {
 }
 
 interface ActiveAcpTurn {
+  instructionDelivery?: {
+    readonly state: T3AcpInstructionState;
+    readonly digest: string;
+    compactionMarker: symbol | undefined;
+  };
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly nativeThreadId: string;
@@ -2022,6 +2029,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   options: AcpAdapterV2Options,
 ) {
   const random = yield* SecureRandom.SecureRandom;
+  const crypto = yield* Digest.Digest;
   const fileSystem = yield* FileSystem.FileSystem;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const agentScope = yield* AgentScope;
@@ -2322,6 +2330,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const markSessionCompacted = Effect.fn("AcpAdapterV2.markSessionCompacted")(function* (
           sessionId: string,
           compactionId?: string,
+          finishing?: ActiveAcpTurn,
         ) {
           if (compactionId !== undefined) {
             const key = `${sessionId}\u0000${compactionId}`;
@@ -2335,6 +2344,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           yield* Ref.update(compactionMarkers, (current) =>
             new Map(current).set(sessionId, Symbol()),
           );
+          const context = finishing ?? (yield* Ref.get(activeTurn));
+          if (
+            context?.nativeThreadId === sessionId &&
+            (finishing !== undefined || !context.finalized)
+          ) {
+            yield* invalidateInstructions(context);
+          } else {
+            if (context?.nativeThreadId === sessionId) yield* Deferred.await(context.completed);
+            const known = (yield* Ref.get(providerThreadByNativeSessionId)).get(sessionId);
+            if (known === undefined) return;
+            yield* invalidateInstructions({
+              nativeThreadId: sessionId,
+              nativeMetadata:
+                (yield* Ref.get(nativeMetadataBySessionId)).get(sessionId) ??
+                known.nativeMetadata ??
+                null,
+            });
+          }
         });
         const advertisedCommandNames = yield* SubscriptionRef.make(
           new Map<string, ReadonlySet<string>>(),
@@ -2706,6 +2733,28 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
+        const invalidateInstructions = Effect.fn("AcpAdapterV2.invalidateInstructions")(function* (
+          context: Pick<ActiveAcpTurn, "nativeThreadId" | "nativeMetadata">,
+        ) {
+          const metadata = { ...context.nativeMetadata, acpInstructions: null };
+          context.nativeMetadata = metadata;
+          yield* Ref.update(nativeMetadataBySessionId, (current) =>
+            new Map(current).set(context.nativeThreadId, metadata),
+          );
+          const known = (yield* Ref.get(providerThreadByNativeSessionId)).get(
+            context.nativeThreadId,
+          );
+          if (known === undefined) return;
+          const providerThread = {
+            ...known,
+            nativeMetadata: metadata,
+            updatedAt: yield* DateTime.now,
+          };
+          yield* Ref.update(providerThreadByNativeSessionId, (current) =>
+            new Map(current).set(context.nativeThreadId, providerThread),
+          );
+          yield* emitProviderEvent({ type: "provider_thread.updated", driver, providerThread });
+        });
         let scheduleDeferredFinalize: (context: ActiveAcpTurn) => Effect.Effect<void> = () =>
           Effect.void;
         let refreshModelSwitchCapability: Effect.Effect<void> = Effect.void;
@@ -4722,6 +4771,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 projectedStatus === undefined
                   ? toolCall.toolCallId.slice("acp-compaction:".length)
                   : undefined,
+                context,
               );
             }
           } else if (mcpIdentity !== undefined) {
@@ -7120,6 +7170,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 normalized.update.status === "completed"
               ) {
                 yield* markSessionCompacted(normalized.sessionId, normalized.update.compactionId);
+                const active = yield* Ref.get(activeTurn);
+                if (active === null || active.finalized) return;
               }
               yield* handleSessionUpdate(normalized);
             },
@@ -7993,6 +8045,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* Ref.set(activeSelection, null);
             yield* Ref.set(activeInteractionMode, null);
             yield* Ref.set(promptInstructionStates, new Map());
+            yield* Ref.update(nativeMetadataBySessionId, (current) =>
+              new Map(current).set(candidate.sessionId, {
+                ...current.get(candidate.sessionId),
+                acpInstructions: null,
+              }),
+            );
             yield* Ref.set(promptRuntimeInstructions, new Map());
             yield* Ref.set(compactionMarkers, new Map());
             yield* Ref.set(completedCompactionIds, new Set());
@@ -8628,14 +8686,34 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (settledStatus !== "failed") {
             yield* emitProviderRetry(context, settledStatus);
           }
+          const now = yield* DateTime.now;
+          const delivery = context.instructionDelivery;
+          if (
+            settledStatus === "completed" &&
+            delivery !== undefined &&
+            (yield* Ref.get(compactionMarkers)).get(context.nativeThreadId) ===
+              delivery.compactionMarker
+          ) {
+            context.nativeMetadata = {
+              ...context.nativeMetadata,
+              acpInstructions: { nativeSessionId: context.nativeThreadId, digest: delivery.digest },
+            };
+            yield* Ref.update(promptInstructionStates, (current) =>
+              new Map(current).set(context.nativeThreadId, delivery.state),
+            );
+            yield* Ref.update(compactionMarkers, (current) => {
+              const updated = new Map(current);
+              updated.delete(context.nativeThreadId);
+              return updated;
+            });
+          }
           if (
             compactsContext &&
             isCompactCommand(context.input.message) &&
             settledStatus === "completed"
           ) {
-            yield* markSessionCompacted(context.nativeThreadId);
+            yield* markSessionCompacted(context.nativeThreadId, undefined, context);
           }
-          const now = yield* DateTime.now;
           if (
             compactsContext &&
             isCompactionMessage(context.input.message) &&
@@ -8684,6 +8762,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             threadId: context.input.threadId,
             providerTurn: turn,
           });
+          const nativeMetadata = context.nativeMetadata;
+          if (nativeMetadata !== null) {
+            yield* Ref.update(nativeMetadataBySessionId, (current) =>
+              new Map(current).set(context.nativeThreadId, nativeMetadata),
+            );
+          }
           const updatedProviderThread: OrchestrationV2ProviderThread = {
             ...context.input.providerThread,
             providerSessionId: input.providerSessionId,
@@ -9009,7 +9093,27 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           );
           // Read delivery state after the awaits above, so a compaction that lands
           // while the prompt is prepared still resends the notes in this prompt.
-          const previousInstructionState = (yield* Ref.get(promptInstructionStates)).get(sessionId);
+          const instructionDigest = yield* crypto
+            .digest(
+              Digest.sha256,
+              new TextEncoder().encode(
+                t3AcpPromptWithInstructions({ prompt: "", state: instructionState }),
+              ),
+            )
+            .pipe(Effect.map(Hex.encode), Effect.orDie);
+          const rememberedInstructions = (yield* Ref.get(nativeMetadataBySessionId)).get(
+            sessionId,
+          )?.acpInstructions;
+          const recordedInstructions =
+            rememberedInstructions === undefined
+              ? turnInput.providerThread.nativeMetadata?.acpInstructions
+              : rememberedInstructions;
+          const previousInstructionState =
+            (yield* Ref.get(promptInstructionStates)).get(sessionId) ??
+            (recordedInstructions?.nativeSessionId === sessionId &&
+            recordedInstructions.digest === instructionDigest
+              ? instructionState
+              : undefined);
           const compactionMarker = (yield* Ref.get(compactionMarkers)).get(sessionId);
           const text = t3AcpPromptWithInstructions({
             prompt: messageText,
@@ -9048,6 +9152,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           return {
             prompt,
             instructionState: text === messageText ? undefined : instructionState,
+            instructionDigest,
             runtimeInstructions: sendRuntimeInstructions ? runtimeInstructions : undefined,
             compactionMarker,
           };
@@ -9098,6 +9203,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             // response must not flip a settled turn.
             Effect.tap((result) =>
               Effect.suspend(() => {
+                if (
+                  settle.promptParts !== null &&
+                  result.stopReason === "refusal" &&
+                  context.instructionDelivery !== undefined
+                ) {
+                  delete context.instructionDelivery;
+                }
                 if (flavor.reportsPerTurnPromptUsage === true && !context.finalized) {
                   context.promptUsage = addAcpUsage(context.promptUsage, result.usage);
                 }
@@ -9132,18 +9244,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       if (promptParts?.runtimeInstructions === undefined) return current;
                       const updated = new Map(current);
                       updated.set(context.nativeThreadId, promptParts.runtimeInstructions);
-                      return updated;
-                    });
-                    yield* Ref.update(compactionMarkers, (current) => {
-                      if (promptParts?.instructionState === undefined) return current;
-                      const observedMarker = promptParts.compactionMarker;
-                      if (
-                        observedMarker === undefined ||
-                        current.get(context.nativeThreadId) !== observedMarker
-                      )
-                        return current;
-                      const updated = new Map(current);
-                      updated.delete(context.nativeThreadId);
                       return updated;
                     });
                   }
@@ -9458,6 +9558,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               );
             }
             const context: ActiveAcpTurn = {
+              ...(promptParts?.instructionState === undefined
+                ? {}
+                : {
+                    instructionDelivery: {
+                      state: promptParts.instructionState,
+                      digest: promptParts.instructionDigest,
+                      compactionMarker: promptParts.compactionMarker,
+                    },
+                  }),
               input: turnInput,
               providerTurnId,
               nativeThreadId: requestedSessionId,
@@ -9659,6 +9768,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 ? undefined
                 : yield* flavor.watchPromptOutcome(requestedSessionId);
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
+            if (promptParts?.instructionState !== undefined) {
+              yield* invalidateInstructions(context);
+              yield* Ref.update(promptInstructionStates, (current) => {
+                const updated = new Map(current);
+                updated.delete(requestedSessionId);
+                return updated;
+              });
+            }
             const promptOptions = {
               dispatched: context.promptDispatched,
               released: context.foregroundIdle,
@@ -9887,6 +10004,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           },
           canResumeAfterRestart: canLoadSession || canResumeSession,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          readInstructionInvalidations: Ref.get(providerThreadByNativeSessionId).pipe(
+            Effect.map((threads) =>
+              [...threads.values()].filter(
+                (thread) => thread.nativeMetadata?.acpInstructions === null,
+              ),
+            ),
+          ),
           ...(flavor.getModelContextWindow === undefined
             ? {}
             : {
@@ -10024,6 +10148,20 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 Effect.gen(function* () {
                   yield* awaitRuntimeTeardown();
                   const sessionId = yield* nativeThreadId(driver, threadInput.providerThread);
+                  const nativeMetadata = yield* Ref.modify(nativeMetadataBySessionId, (current) => {
+                    const metadata = {
+                      ...threadInput.providerThread.nativeMetadata,
+                      ...current.get(sessionId),
+                    };
+                    return [metadata, new Map(current).set(sessionId, metadata)] as const;
+                  });
+                  yield* Ref.update(providerThreadByNativeSessionId, (current) =>
+                    new Map(current).set(sessionId, {
+                      ...threadInput.providerThread,
+                      providerSessionId: input.providerSessionId,
+                      nativeMetadata,
+                    }),
+                  );
                   const previousItemIdentityVersion = itemIdentityVersion;
                   useProviderThreadIdentity(threadInput.providerThread);
                   const restorePreviousItemIdentity = Effect.sync(() => {
@@ -10048,12 +10186,27 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     yield* Ref.set(activeInteractionMode, nextRuntimePolicy.interactionMode);
                   }
                   const now = yield* DateTime.now;
-                  return {
+                  const rememberedMetadata = (yield* Ref.get(nativeMetadataBySessionId)).get(
+                    sessionId,
+                  );
+                  const providerThread = {
                     ...threadInput.providerThread,
                     providerSessionId: input.providerSessionId,
+                    ...(rememberedMetadata === undefined
+                      ? {}
+                      : {
+                          nativeMetadata: {
+                            ...threadInput.providerThread.nativeMetadata,
+                            ...rememberedMetadata,
+                          },
+                        }),
                     status: "idle" as const,
                     updatedAt: now,
                   };
+                  yield* Ref.update(providerThreadByNativeSessionId, (current) =>
+                    new Map(current).set(sessionId, providerThread),
+                  );
+                  return providerThread;
                 }),
               );
             },
@@ -10661,6 +10814,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       nativeConversationHeadRef: null,
                       nativeMetadata: {
                         ...rollbackInput.providerThread.nativeMetadata,
+                        acpInstructions: null,
                         itemIdentityVersion: 2 as const,
                       },
                       status: "idle" as const,
