@@ -1247,3 +1247,38 @@ it.effect("catches up after startup without polling after success", () =>
     assert.equal(publications[1]?.state?.threadId, THREAD_ID);
   }),
 );
+
+it.effect("redacts project, thread, and model titles when T3CODE_REDACT_RELAY_ACTIVITY=true", () =>
+  Effect.gen(function* () {
+    const previous = process.env.T3CODE_REDACT_RELAY_ACTIVITY;
+    process.env.T3CODE_REDACT_RELAY_ACTIVITY = "true";
+    yield* Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* Ref.set(currentShell, shell({ title: "Secret feature work" }));
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+      assert.include(publications[0]?.state, {
+        threadId: THREAD_ID,
+        projectTitle: "Private project",
+        threadTitle: "T3 Code",
+        modelTitle: "Agent",
+        phase: "running",
+        deepLink: `/threads/relay-environment/${THREAD_ID}`,
+      });
+
+      yield* Ref.set(currentShell, shell({ title: "Another secret title" }));
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previous === undefined) {
+            delete process.env.T3CODE_REDACT_RELAY_ACTIVITY;
+          } else {
+            process.env.T3CODE_REDACT_RELAY_ACTIVITY = previous;
+          }
+        }),
+      ),
+    );
+  }),
+);
