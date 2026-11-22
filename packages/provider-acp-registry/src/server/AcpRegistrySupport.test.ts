@@ -1224,7 +1224,7 @@ describe("AcpRegistrySupport", () => {
       );
       const result = yield* resolver.search({ query: "codex" });
 
-      expect(lookups).toEqual(["npm"]);
+      expect(lookups).toEqual([]);
       expect(result.agents.map((agent) => agent.id)).toEqual(["codex-acp", "other-agent"]);
       expect(result.agents[0]).toMatchObject({
         authors: ["OpenAI", "Zed Industries"],
