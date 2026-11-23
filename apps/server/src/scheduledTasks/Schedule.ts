@@ -39,14 +39,38 @@ export function nextScheduledRunAt(
     const parsed = Cron.parse(normalized, zone);
     if (Result.isFailure(parsed)) return null;
     try {
-      let cursor: DateTime.DateTime.Input = from;
+      let cursorMs = DateTime.toEpochMillis(from);
       for (let attempt = 0; attempt < 16; attempt += 1) {
-        const candidate = Cron.next(parsed.success, cursor);
-        if (Cron.match(parsed.success, candidate)) {
-          const next = DateTime.fromDateUnsafe(candidate);
-          return DateTime.isZoned(from) ? DateTime.setZone(next, from.zone) : next;
+        const candidate = Cron.next(parsed.success, cursorMs);
+        const candidateMs = candidate.getTime();
+        const scanStartMs = Math.max(
+          Math.floor(cursorMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS,
+          candidateMs - 120 * MINUTE_MS,
+        );
+        const matchesCandidate = Cron.match(parsed.success, candidate);
+        const crossedSpringForward =
+          DateTime.isZoned(from) &&
+          DateTime.zonedOffset(DateTime.setZone(DateTime.makeUnsafe(candidateMs), from.zone)) >
+            DateTime.zonedOffset(
+              DateTime.setZone(DateTime.makeUnsafe(scanStartMs - MINUTE_MS), from.zone),
+            );
+        let matchedMs: number | null = matchesCandidate ? candidateMs : null;
+        if (!matchesCandidate || crossedSpringForward) {
+          // A nonexistent spring-forward wall time shifts forward by the DST gap,
+          // which can overshoot an earlier valid match right after the gap (even if the shifted time also matches).
+          for (let ts = scanStartMs; ts < candidateMs; ts += MINUTE_MS) {
+            if (Cron.match(parsed.success, ts)) {
+              matchedMs = ts;
+              break;
+            }
+          }
         }
-        cursor = candidate;
+        if (matchedMs === null) {
+          cursorMs = candidateMs;
+          continue;
+        }
+        const next = DateTime.makeUnsafe(matchedMs);
+        return DateTime.isZoned(from) ? DateTime.setZone(next, from.zone) : next;
       }
       return null;
     } catch {

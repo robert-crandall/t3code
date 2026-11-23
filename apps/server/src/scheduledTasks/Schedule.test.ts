@@ -162,6 +162,22 @@ describe("scheduled task schedule calculation", () => {
     expect(skippedHourParts?.hour).toBe(2);
     expect(skippedHourParts?.minute).toBe(30);
 
+    // Partial-hour spring-forward: 2026-10-04 jumps 02:00 -> 02:30 in Australia/Lord_Howe.
+    // Nonexistent 02:15 must be skipped without overshooting the valid 02:30 run,
+    // even when the shifted wall time (02:45) itself matches the cron.
+    const lordHoweBefore = DateTime.makeZonedUnsafe(
+      { year: 2026, month: 10, day: 3, hour: 10, minute: 0, second: 0, millisecond: 0 },
+      { timeZone: "Australia/Lord_Howe", adjustForTimeZone: true },
+    );
+    for (const expression of ["15,30 2 * * *", "15,30,45 2 * * *"]) {
+      const partialGapNext = nextScheduledRunAt({ type: "cron", expression }, lordHoweBefore);
+      const partialGapParts = partialGapNext ? DateTime.toParts(partialGapNext) : null;
+      expect(partialGapParts?.month).toBe(10);
+      expect(partialGapParts?.day).toBe(4);
+      expect(partialGapParts?.hour).toBe(2);
+      expect(partialGapParts?.minute).toBe(30);
+    }
+
     // Fall-back: 2026-11-01 01:30 occurs twice in America/Los_Angeles
     const firstOverlap = nextScheduledRunAt(
       { type: "cron", expression: "30 1 * * *" },
