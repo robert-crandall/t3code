@@ -71,6 +71,7 @@
   "cd03eb1b84271c02": "智能体",
   "bfe1a60f3f9c60fb": "第 {turn} 轮 · {what}",
   "dfdaa6255a416140": "{turns, plural, one {最近 {turns} 轮的概要} other {最近 {turns} 轮的概要}}，{textTurns, plural, =0 {不含消息文本} one {包含最后一轮的消息文本} other {包含最近 {textTurns} 轮的消息文本}}{truncated, select, yes {，已缩短以符合长度限制} other {}}",
+  "260c6b45f52d2f27": "添加你在最近 {textTurns} 轮中的消息和智能体回复的文本。",
   "afac52a5cc2dc801": "无法发送你的回答。请重试。",
   "79d776428f4d0650": "无法加载文件。请重新连接后重试。",
   "3ea34cbb1ca5ba9b": "预览已取消。",
@@ -385,6 +386,10 @@
   "24d802debbab31e0": "{rerun, plural, other {已重新运行 {rerun} 项检查，{refused} 项被拒绝}}",
   "8146ee71f7426683": "{count, plural, other {已审查 {count} 个 PR}}",
   "638678077ba2e050": "{count, plural, other {尝试审查 {count} 个 PR}}",
+  "71474e57f25e4e37": "{count, plural, one {Read T3 tool help {count} time} other {Read T3 tool help {count} times}}",
+  "b0f25b3b5bd3a4fe": "{count, plural, one {Tried to read T3 tool help {count} time} other {Tried to read T3 tool help {count} times}}",
+  "f8b3a3050e682599": "{count, plural, one {Called {count} T3 tool} other {Called {count} T3 tools}}",
+  "779adb54537bdc63": "{count, plural, one {Tried to call {count} T3 tool} other {Tried to call {count} T3 tools}}",
   "420bea546d5f8802": "已复制会话",
   "2efb2dd3bf170f67": "无法复制会话",
   "6c03545936b55e0b": "已复制 PR 链接",
@@ -2737,9 +2742,9 @@
   "db7b3a938c45e56c": "更新 {version} 已可下载",
   "9a951140b69ba740": "正在下载更新（{percent}%）",
   "7fdece033260e9fb": "正在下载更新",
+  "52e1d4a487c0cf4b": "安装 {version} 失败。点击重试。",
   "09ef51903e99e876": "更新已下载。点击重启并安装。",
   "d62631cab06d2b80": "更新 {version} 已下载。点击重启并安装。",
-  "52e1d4a487c0cf4b": "安装 {version} 失败。点击重试。",
   "78a04e0e625c0990": "更新失败",
   "c24de5eb69373a55": "此 {build} 版本会忽略 {track} 版本。请在设置中检查更新通道以完成切换。",
   "b02ae45a6109c93b": "已是最新版本",
@@ -3643,7 +3648,6 @@
   "4e0710d19dfc2e7e": "将这份报告发送给 T3 团队？",
   "87d0ae0723ba75d1": "只有这些内容会从你的机器发送出去。点击“发送”前，不会发送任何内容。",
   "bf19826f81484328": "包含对话",
-  "260c6b45f52d2f27": "添加你在最近 {textTurns} 轮中的消息和智能体回复的文本。",
   "ddb7e6f8ce99e657": "只有能在这台机器上运行智能体的人，才能发送或拒绝这份报告。",
   "03c1eb603c112f47": "不发送",
   "653405e4ed498d9f": "发送",
@@ -8772,9 +8776,13 @@
   "ed83b25c71c98a20": "为每个项目选择一个或多个 {tracker} {scope}。它们的 issue 会列在仓库自身的 issue 旁；除非另有指定，智能体会在第一个中创建新 issue。",
   "19c2d5e81ff8f89a": "{project} 的 {tracker} {scope}",
   "68e061510b765772": "未绑定",
+  "99d51127f573296b": "其他账号",
+  "8ec2c57414669b79": "连接第二个 {tracker} 工作区或用户。",
+  "99963c0142e17f00": "用于新的 {tracker} 账号。",
   "a2d95d39d3398bda": "凭据被拒绝",
   "9eae463720500113": "存储在服务器上。",
   "b6e27ab2537ef874": "创建一个",
+  "6d8e4ebc889bace9": "添加账号",
   "13ef526271b0f5d4": "清除所有条件",
   "d1938a629f039515": "移除条件",
   "84a605b241ce65b7": "移除条件组及其条件",
@@ -9866,6 +9874,8 @@
   "6e820a7742353257": "请输入至少一分钟的间隔。",
   "9e596c405f5cea09": "此环境不支持单次运行",
   "e450f26e1af0a074": "此环境运行的是旧版 T3 Code。请更新后再创建单次定时任务，或选择其他定时规则。",
+  "14f522da60702611": "Cron is not available here",
+  "00ea5df0d5cc65e6": "This environment runs an older T3 Code. Update it to schedule a cron task, or pick another schedule.",
   "71d8554090924454": "请填写工作副本路径",
   "a34b72de0ff1cbd0": "请输入任务运行所在的工作副本路径。",
   "99a8c45121157edd": "无法保存定时任务",
@@ -9936,6 +9946,7 @@
   "038b86fd8ba9a6aa": "此任务使用旧版间隔，不到一分钟。保存后会调整为至少一分钟。",
   "2f3f300a16007bd8": "定时规则",
   "ce1b005dfc83db03": "固定时间",
+  "dc797371956718d8": "Cron",
   "dac46f3c9d007f8b": "单次",
   "3a851981dc1fdfc4": "按间隔",
   "dff69f5877b71ab0": "收到 webhook 时",
@@ -9943,6 +9954,8 @@
   "a844a27ea5562bea": "从首次投递开始计算合并窗口，窗口结束时仅使用最新请求内容运行一次。键为空时正常运行。",
   "3251afd79525a3fd": "要求签名",
   "c44384bc2871dca0": "拒绝请求体缺少有效 HMAC-SHA256 签名的请求。",
+  "316f12ddbabba34e": "Expression",
+  "52e207f93aae758c": "5 fields: minute, hour, day, month, weekday. Example: 0 9-17 * * 1-5 (hourly on weekdays, 9:00 to 17:00).",
   "aceef99b454c3fd2": "运行时间",
   "06c1387ed52a09c7": "星期",
   "c252355a8f2e8f2d": "运行间隔",
@@ -11756,6 +11769,8 @@
   "ded467fac40e823e": "一次，{time}",
   "32f36b059ed73dc0": "每 {minutes} 分钟",
   "b1eb053919fcb482": "每 {seconds} 秒",
+  "a4c9ab5361faefe7": "Cron ({expression})",
+  "0002755575f2658f": "Cron ({expression}) {zone}",
   "d6d2c794518c8906": "每天 {time}",
   "29d245e6c8e8b5d7": "每天 {time} {zone}",
   "5115c6bf9ed1decd": "工作日 {time}",
@@ -11766,6 +11781,8 @@
   "2b5678bf6b6792d4": "请选择日期和时间。",
   "f062630735a207ea": "你所在的时区不存在这个时间。",
   "75265b7ef76cfedd": "请选择时间。",
+  "eda6a4ccc66dea8a": "Invalid cron expression",
+  "b51451a5469abdfb": "Use 5 fields: minute, hour, day, month, weekday (for example, 0 9-17 * * 1-5).",
   "d803687d3f35d6e2": "请求时效限制无效",
   "24fef66c1ab1b2a6": "请输入 1 到 {max} 之间的整数分钟数，或留空。",
   "9bac9c1971b6f577": "重复请求键必须包含有效的请求占位符。",
@@ -12622,6 +12639,15 @@
   "156ff7b625287a1e": "隐藏已跳过",
   "69b985b97ab45e6b": "显示 {count} 个已跳过",
   "2400254d362de84d": "正在加载工作流运行…",
+  "cae5c3205c01d062": [
+    {
+      "t": "span",
+      "i": 1,
+      "c": "有工作流文件存在问题。"
+    },
+    "上一个可加载的版本会继续运行。"
+  ],
+  "ed8ce6ebc73dc12d": "打开文件",
   "145e1f7503ba3b2c": [
     "此环境中没有该链接对应的运行。",
     " ",
@@ -12648,15 +12674,6 @@
       "c": "阅读指南"
     }
   ],
-  "cae5c3205c01d062": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "有工作流文件存在问题。"
-    },
-    "上一个可加载的版本会继续运行。"
-  ],
-  "ed8ce6ebc73dc12d": "打开文件",
   "5d8d278ff828102d": "全部工作流",
   "39459da07479f482": "智能体",
   "7741243632056b81": "{step} · 记录",
@@ -12801,9 +12818,5 @@
   "27d76249d09eb69f": "审查导览已就绪",
   "faa3bb26abb39c93": "审查导览生成失败",
   "b7df38b7d8792d78": "打开导览",
-  "9e91e9a77b664e4e": "无法开始生成审查导览",
-  "99d51127f573296b": "其他账号",
-  "8ec2c57414669b79": "连接第二个 {tracker} 工作区或用户。",
-  "99963c0142e17f00": "用于新的 {tracker} 账号。",
-  "6d8e4ebc889bace9": "添加账号"
+  "9e91e9a77b664e4e": "无法开始生成审查导览"
 }

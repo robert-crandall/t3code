@@ -139,6 +139,12 @@ function describeSchedule(
   }
   if (task.schedule.type === "interval")
     return formatScheduledTaskInterval(task.schedule.everyMs, resolve);
+  if (task.schedule.type === "cron") {
+    const zone = scheduleTimeZoneLabel(timeZone, task.nextRunAt);
+    return zone === undefined
+      ? resolve(msg("Cron ({expression})", { expression: task.schedule.expression }))
+      : resolve(msg("Cron ({expression}) {zone}", { expression: task.schedule.expression, zone }));
+  }
   const days = task.schedule.weekdays?.length
     ? repeatLabel(task.schedule.weekdays, resolve, locale)
     : resolve(msg("Every day"));
@@ -204,6 +210,8 @@ function FormField(props: {
   readonly keyboardType?: "decimal-pad" | "number-pad";
   readonly disabled?: boolean;
   readonly placeholder?: string;
+  readonly autoCapitalize?: "none" | "sentences" | "words" | "characters";
+  readonly autoCorrect?: boolean;
   readonly borderTop?: boolean;
 }) {
   return (
@@ -220,6 +228,8 @@ function FormField(props: {
         onChangeText={props.onChange}
         textAlignVertical="center"
         keyboardType={props.keyboardType}
+        autoCapitalize={props.autoCapitalize}
+        autoCorrect={props.autoCorrect}
         placeholder={props.placeholder}
         placeholderTextColorClassName="accent-foreground-muted"
         className="min-h-8 font-sans text-base text-foreground"
@@ -799,6 +809,8 @@ function TaskForm({
   const offersOnce =
     config?.environment.capabilities.oneTimeSchedules === true ||
     draft.task?.schedule.type === "once";
+  const offersCron =
+    config?.environment.capabilities.cronSchedules === true || draft.task?.schedule.type === "cron";
   const offersThreadModes = config?.environment.capabilities.scheduledTaskThreadModes === true;
   const save = async () => {
     const current = readEditor();
@@ -840,6 +852,23 @@ function TaskForm({
           "This environment runs an older {product}. Update it to schedule a one-time task, or pick another schedule.",
           { product: "T3 Code" },
         ),
+      );
+      return;
+    }
+    if (draft.schedule.mode === "cron" && !offersCron) {
+      Dialog.alert(
+        gt("Cron is not available here"),
+        gt(
+          "This environment runs an older {product}. Update it to schedule a cron task, or pick another schedule.",
+          { product: "T3 Code" },
+        ),
+      );
+      return;
+    }
+    if (draft.schedule.mode === "cron" && schedule === null) {
+      Dialog.alert(
+        gt("Invalid cron expression"),
+        gt("Use 5 fields: minute, hour, day, month, weekday (for example, 0 9-17 * * 1-5)."),
       );
       return;
     }
@@ -1153,6 +1182,9 @@ function TaskForm({
               variant="card"
               options={[
                 { value: "fixed_time", label: gt("At a time") },
+                ...(offersCron || draft.schedule.mode === "cron"
+                  ? [{ value: "cron" as const, label: gt("Cron") }]
+                  : []),
                 // Older servers reject one-time schedules on save.
                 ...(offersOnce || draft.schedule.mode === "once"
                   ? [
@@ -1286,6 +1318,31 @@ function TaskForm({
                 reason: webhookDenial,
               })}
             </Text>
+          ) : draft.schedule.mode === "cron" ? (
+            <>
+              <FormField
+                label={
+                  runAtZone ? gt("Expression ({zone})", { zone: runAtZone }) : gt("Expression")
+                }
+                value={draft.schedule.cronExpression}
+                placeholder="0 9-17 * * 1-5"
+                autoCapitalize="none"
+                autoCorrect={false}
+                disabled={saving}
+                borderTop
+                onChange={(cronExpression) =>
+                  setDraft((current) => ({
+                    ...current,
+                    schedule: { ...current.schedule, cronExpression },
+                  }))
+                }
+              />
+              <Text className="px-4 pb-3 text-xs text-foreground-muted">
+                {gt(
+                  "5 fields: minute, hour, day, month, weekday. Example: 0 9-17 * * 1-5 (hourly on weekdays, 9:00 to 17:00).",
+                )}
+              </Text>
+            </>
           ) : draft.schedule.mode === "once" ? (
             (["date", "time"] as const).map((field) => {
               const runAt = new Date(draft.schedule.runAt);
@@ -1465,7 +1522,7 @@ function TaskForm({
             />
           </View>
         </SettingsSection>
-        {draft.schedule.mode === "fixed_time" ? (
+        {draft.schedule.mode === "fixed_time" || draft.schedule.mode === "cron" ? (
           <Text className="px-2 text-sm text-foreground-muted">
             <T>Time uses the environment's time zone, which may differ from your phone's.</T>
           </Text>

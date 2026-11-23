@@ -95,6 +95,7 @@ import { EnvironmentRow, useEnvironmentTransportLabel } from "./EnvironmentRow";
 import { SettingsGroup } from "./SettingsGroup";
 import { settingsScopeEnvironmentLabel, settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 import {
+  DEFAULT_CRON_EXPRESSION,
   WEBHOOK_SIGNATURE_DEFAULTS,
   changeDraftProject,
   moveDraftToThread,
@@ -189,6 +190,7 @@ const EMPTY_DRAFT: DraftState = {
   scheduleMode: "fixed",
   intervalMinutes: "15",
   timeOfDay: "09:00",
+  cronExpression: DEFAULT_CRON_EXPRESSION,
   runAt: "",
   savedRunAt: "",
   weekdays: new Set([1, 2, 3, 4, 5]),
@@ -1487,6 +1489,9 @@ function ScheduledTaskEditorForm({
   const offersOnce =
     environment?.serverConfig?.environment.capabilities.oneTimeSchedules === true ||
     task?.schedule.type === "once";
+  const offersCron =
+    environment?.serverConfig?.environment.capabilities.cronSchedules === true ||
+    task?.schedule.type === "cron";
   const offersThreadModes =
     environment?.serverConfig?.environment.capabilities.scheduledTaskThreadModes === true;
   const connected =
@@ -1656,6 +1661,15 @@ function ScheduledTaskEditorForm({
         gt("Once is not available here"),
         gt(
           "This environment runs an older T3 Code. Update it to schedule a one-time task, or pick another schedule.",
+        ),
+      );
+      return;
+    }
+    if (schedule.type === "cron" && !offersCron) {
+      reportFailure(
+        gt("Cron is not available here"),
+        gt(
+          "This environment runs an older T3 Code. Update it to schedule a cron task, or pick another schedule.",
         ),
       );
       return;
@@ -1992,6 +2006,7 @@ function ScheduledTaskEditorForm({
                   const mode = values[0] as ScheduleMode | undefined;
                   if (
                     mode === "fixed" ||
+                    mode === "cron" ||
                     mode === "once" ||
                     mode === "interval" ||
                     mode === "webhook"
@@ -2022,6 +2037,11 @@ function ScheduledTaskEditorForm({
                 <Toggle value="fixed">
                   <T>At a time</T>
                 </Toggle>
+                {offersCron || draft.scheduleMode === "cron" ? (
+                  <Toggle value="cron">
+                    <T>Cron</T>
+                  </Toggle>
+                ) : null}
                 {offersOnce || draft.scheduleMode === "once" ? (
                   <Toggle value="once">
                     <T>Once</T>
@@ -2234,6 +2254,35 @@ function ScheduledTaskEditorForm({
                     </Field>
                   </div>
                 ) : null}
+              </div>
+            ) : draft.scheduleMode === "cron" ? (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="scheduled-task-cron">
+                    <T>Expression</T>
+                  </Label>
+                  <Input
+                    id="scheduled-task-cron"
+                    aria-describedby="scheduled-task-cron-help"
+                    className="w-56"
+                    placeholder="0 9-17 * * 1-5"
+                    spellCheck={false}
+                    autoComplete="off"
+                    value={draft.cronExpression}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, cronExpression: event.target.value }))
+                    }
+                  />
+                  {runAtZone === undefined ? null : (
+                    <span className="text-xs text-muted-foreground">{runAtZone}</span>
+                  )}
+                </div>
+                <p id="scheduled-task-cron-help" className="text-xs text-muted-foreground">
+                  <T>
+                    5 fields: minute, hour, day, month, weekday. Example: 0 9-17 * * 1-5 (hourly on
+                    weekdays, 9:00 to 17:00).
+                  </T>
+                </p>
               </div>
             ) : draft.scheduleMode === "once" ? (
               <div className="flex items-center gap-2">

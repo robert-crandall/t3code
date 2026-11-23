@@ -3,8 +3,10 @@ import * as Schema from "effect/Schema";
 
 import {
   MIN_SCHEDULED_TASK_INTERVAL_MS,
+  normalizeScheduledTaskCron,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
+  validateScheduledTaskCron,
 } from "./scheduledTask.ts";
 
 const decodeSchedule = Schema.decodeUnknownSync(ScheduledTaskSchedule);
@@ -37,6 +39,41 @@ describe("ScheduledTaskSchedule", () => {
     ]) {
       expect(() => decodeUpsertSchedule({ type: "once", runAt })).toThrow();
     }
+  });
+
+  it("accepts valid 5-field cron expressions and rejects invalid or impossible ones on upsert", () => {
+    for (const expression of [
+      "0 9-17 * * 1-5",
+      "*/30 9-16 * * MON-FRI",
+      "0 9 31 4 1",
+      "  0   9-17   *   *   1-5  ",
+    ]) {
+      expect(decodeUpsertSchedule({ type: "cron", expression })).toEqual({
+        type: "cron",
+        expression: expression.trim(),
+      });
+    }
+    for (const expression of [
+      "",
+      "   ",
+      "0 0 9 * * 1-5",
+      "0 9 * *",
+      "60 9 * * 1-5",
+      "0 25 * * 1-5",
+      "0 0 30 2 *",
+      "@hourly",
+      "0 ".repeat(130) + "9 * * *",
+    ]) {
+      expect(() => decodeUpsertSchedule({ type: "cron", expression })).toThrow();
+      expect(validateScheduledTaskCron(expression)).not.toBeNull();
+    }
+    expect(decodeSchedule({ type: "cron", expression: "0 0 30 2 *" })).toEqual({
+      type: "cron",
+      expression: "0 0 30 2 *",
+    });
+    expect(normalizeScheduledTaskCron("  */30   9-16\t*  *  MON-FRI ")).toBe(
+      "*/30 9-16 * * MON-FRI",
+    );
   });
 });
 
