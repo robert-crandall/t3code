@@ -4,7 +4,7 @@
   "forkRepo": "robert-crandall/t3code",
   "integrationBranch": "copilot-custom",
   "upstreamBaseBranch": "main",
-  "lastUpstreamMainSha": "f10e1eb3825a773cf702569d2258edfdbc8b77dc",
+  "lastUpstreamMainSha": "fab237d62629925f271f4b48f2ffa4eedc95a271",
   "patches": [
     {
       "pr": 36617,
@@ -28,7 +28,7 @@
       "title": "feat(acp-registry): Copilot can generate thread titles and commit messages",
       "status": "integrated",
       "reviewedHeadSha": "f48cbf51a02bac15222dcf2c3b19e5b8ccad9984",
-      "notes": "Adds ProviderTextGeneration support via Copilot ACP for automatic thread titles and commit messages."
+      "notes": "Adds hardened ProviderTextGeneration support via Copilot ACP (--available-tools=t3_no_tools, isolated COPILOT_HOME, --sync-session=off, and automatic-fallback exclusion). Closed upstream on 2026-11-23 under vendor-specific policy in favor of #41289; retained in fork over #41289 until #41289 isolates tools/hooks/session history for Copilot CLI."
     },
     {
       "pr": 37799,
@@ -36,7 +36,7 @@
       "title": "fix(server): Copilot threads can call optional T3 tools again",
       "status": "integrated",
       "reviewedHeadSha": "6bb83837c5e273fcc224ee827bf7e9bd225a7b03",
-      "notes": "Replaces tool_search dynamic MCP capability swap with stable t3_help/t3_call gateway; adapted t3ToolSummary.ts to gt-i18n and added upstream issues/pull_requests/t3_submit_output tools to McpToolGroups.ts."
+      "notes": "Replaces tool_search dynamic MCP capability swap with stable t3_help/t3_call gateway; adapted t3ToolSummary.ts to gt-i18n and added upstream issues, pull_requests, t3_submit_output, t3_workflow, and t3_feedback tools to McpToolGroups.ts."
     },
     {
       "pr": 39626,
@@ -52,7 +52,7 @@
       "title": "fix(acp): list Copilot skills in the skill menu",
       "status": "integrated",
       "reviewedHeadSha": "2070c0c4d2e4374bf8843bf5fcf1f3aa5e524c3a",
-      "notes": "Discovers personal/plugin/project Copilot skills and rewrites $skill mentions to /skill; preserved direct child skill folders named build/dist/vendor/coverage inside skills containers."
+      "notes": "Discovers personal/plugin/project Copilot skills and rewrites $skill mentions to /skill; preserved direct child skill folders named build/dist/vendor/coverage inside skills containers. Auto-closed upstream on 2026-11-23 by conflict-window bot; retained cleanly in fork."
     },
     {
       "pr": 32476,
@@ -187,7 +187,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/39362",
       "title": "fix(antigravity): defer optional T3 MCP tools via tool_call proxy",
       "status": "skipped",
-      "reviewedHeadSha": "4d91c1732ef33a99368831b6d54022665fab71bc",
+      "reviewedHeadSha": "2c9d50878ea020decd04dfe11501c99db8eb27c0",
       "skipReason": "Antigravity-only (+816/-69) MCP proxy change; Copilot optional T3 tools are already covered by #37799."
     },
     {
@@ -243,7 +243,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/40368",
       "title": "fix(antigravity): keep native ACP swarm runs active and stream worker subagents",
       "status": "skipped",
-      "reviewedHeadSha": "c234ad5192e800a26e288a8914727bfd76c2a52b",
+      "reviewedHeadSha": "82a55231e778f43f750d5cf920da34ef4e05f3f8",
       "skipReason": "Large conflicting Antigravity-only swarm refactor (+3251/-124)."
     },
     {
@@ -261,6 +261,78 @@
       "status": "skipped",
       "reviewedHeadSha": "7497cd61cb8411e2cd3b5c680e26203e1e1a2eaa",
       "skipReason": "Failing CI checks upstream (2 failures) and generic server disk error handling rather than Copilot/ACP."
+    },
+    {
+      "pr": 41289,
+      "url": "https://github.com/pingdotgg/t3code/pull/41289",
+      "title": "feat(acp-registry): support explicit text generation",
+      "status": "skipped",
+      "reviewedHeadSha": "32b6b0f2e8ff2d9d64e85879e78f279f0ab5690c",
+      "skipReason": "Generic ACP Registry text generation launches normal Copilot CLI sessions with user ~/.copilot hooks/MCP/instructions and session history, whereas fork-retained #32976 runs hardened no-tool isolated COPILOT_HOME helpers."
+    },
+    {
+      "pr": 40970,
+      "url": "https://github.com/pingdotgg/t3code/pull/40970",
+      "title": "fix(acp): Stop ends the commands the stopped turn started in client terminals",
+      "status": "skipped",
+      "reviewedHeadSha": "18116b9299e85e23f64bb39bccce6ca1c8efcc59",
+      "skipReason": "Stopped upstream (factory:stopped-cannot-prove) with 3 unresolved review defects: activeTurn race losing interruptContext, unbounded Deferred.await(terminal.exit) hanging Stop, and terminal creation race."
+    },
+    {
+      "pr": 41118,
+      "url": "https://github.com/pingdotgg/t3code/pull/41118",
+      "title": "fix(provider-acp): Devin's html_render pages show in the thread",
+      "status": "skipped",
+      "reviewedHeadSha": "be3ef0ed5652a10098cdce48e0d128914d62752c",
+      "skipReason": "Devin-specific html_render handling unrelated to Copilot ACP."
+    },
+    {
+      "pr": 40913,
+      "url": "https://github.com/pingdotgg/t3code/pull/40913",
+      "title": "feat(web): add a one-click Oh My Pi preset to Add provider",
+      "status": "skipped",
+      "reviewedHeadSha": "599e6c096ee62d28e0c326a13695772df1d5555b",
+      "skipReason": "Oh My Pi UI preset unrelated to Copilot ACP."
+    },
+    {
+      "pr": 40921,
+      "url": "https://github.com/pingdotgg/t3code/pull/40921",
+      "title": "fix(antigravity): mid-turn 401 OAuth refresh errors resume once automatically",
+      "status": "skipped",
+      "reviewedHeadSha": "96acbdfa31b5e4d51e9c33323ace60b9a2df328d",
+      "skipReason": "Antigravity-only OAuth refresh handling unrelated to Copilot ACP."
+    },
+    {
+      "pr": 41337,
+      "url": "https://github.com/pingdotgg/t3code/pull/41337",
+      "title": "fix(antigravity): normalize per-turn prompt usage at driver boundary",
+      "status": "skipped",
+      "reviewedHeadSha": "e565888422a4d2c464e6af20cdff820d5ec9bc3c",
+      "skipReason": "Antigravity-only prompt usage normalization unrelated to Copilot ACP."
+    },
+    {
+      "pr": 35392,
+      "url": "https://github.com/pingdotgg/t3code/pull/35392",
+      "title": "fix(acp): agents that refuse per-session MCP servers can open threads",
+      "status": "skipped",
+      "reviewedHeadSha": "d75224f4815ecc5efd89e4fbe8f37f64eed9ce97",
+      "skipReason": "Conflicting stale PR for agents that reject per-session MCP servers; Copilot ACP supports HTTP MCP servers."
+    },
+    {
+      "pr": 28039,
+      "url": "https://github.com/pingdotgg/t3code/pull/28039",
+      "title": "feat(provider-acp-registry): let local ACP providers opt into late output after a turn ends",
+      "status": "skipped",
+      "reviewedHeadSha": "99d7d38f01e95289e12e41c636d75db532769420",
+      "skipReason": "Conflicting custom local-provider opt-in setting not needed for Copilot ACP."
+    },
+    {
+      "pr": 34032,
+      "url": "https://github.com/pingdotgg/t3code/pull/34032",
+      "title": "fix(server): Grok agent processes receive the thread's environment",
+      "status": "skipped",
+      "reviewedHeadSha": "5757c81284c6b70f135f4cf81a0b1978ab4128f2",
+      "skipReason": "Grok-specific process environment fix unrelated to Copilot ACP."
     }
   ]
 }
