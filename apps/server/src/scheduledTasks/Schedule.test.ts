@@ -147,6 +147,21 @@ describe("scheduled task schedule calculation", () => {
     expect(springParts?.hour).toBe(9);
     expect(springParts?.minute).toBe(0);
 
+    // Spring-forward skipped hour: 2026-03-29 02:30 does not exist in Europe/Berlin
+    // (clocks jump 02:00 -> 03:00). Skip the nonexistent occurrence rather than shifting to 03:30.
+    const skippedHourNext = nextScheduledRunAt(
+      { type: "cron", expression: "30 2 * * *" },
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 3, day: 28, hour: 10, minute: 0, second: 0, millisecond: 0 },
+        { timeZone: "Europe/Berlin", adjustForTimeZone: true },
+      ),
+    );
+    const skippedHourParts = skippedHourNext ? DateTime.toParts(skippedHourNext) : null;
+    expect(skippedHourParts?.month).toBe(3);
+    expect(skippedHourParts?.day).toBe(30);
+    expect(skippedHourParts?.hour).toBe(2);
+    expect(skippedHourParts?.minute).toBe(30);
+
     // Fall-back: 2026-11-01 01:30 occurs twice in America/Los_Angeles
     const firstOverlap = nextScheduledRunAt(
       { type: "cron", expression: "30 1 * * *" },

@@ -39,8 +39,16 @@ export function nextScheduledRunAt(
     const parsed = Cron.parse(normalized, zone);
     if (Result.isFailure(parsed)) return null;
     try {
-      const next = DateTime.fromDateUnsafe(Cron.next(parsed.success, from));
-      return DateTime.isZoned(from) ? DateTime.setZone(next, from.zone) : next;
+      let cursor: DateTime.DateTime.Input = from;
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        const candidate = Cron.next(parsed.success, cursor);
+        if (Cron.match(parsed.success, candidate)) {
+          const next = DateTime.fromDateUnsafe(candidate);
+          return DateTime.isZoned(from) ? DateTime.setZone(next, from.zone) : next;
+        }
+        cursor = candidate;
+      }
+      return null;
     } catch {
       return null;
     }
