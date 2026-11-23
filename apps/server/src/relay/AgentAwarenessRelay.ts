@@ -41,6 +41,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import {
   isAgentActivityPublishingEnabledValue,
   PUBLISH_AGENT_ACTIVITY_SECRET,
@@ -426,6 +427,7 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
 /** @public */
 export const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const projects = yield* ProjectService.ProjectService;
@@ -480,6 +482,16 @@ export const make = Effect.gen(function* () {
   const publishConfirmDeadlines = new Map<ThreadId, number>();
   // Threads whose confirmation holds a completion, so a thread that settles during the hold still alerts.
   const heldCompletions = new Set<ThreadId>();
+  const suppressedThreads = new Set<ThreadId>();
+  // Remember suppressed terminal results so retries stay silent and later events do not replay them.
+  const suppressedTerminalIdentity = new Map<ThreadId, string>();
+  let desktopResume: { timer: Fiber.Fiber<void> | undefined } | undefined;
+  const cancelDesktopResume = Effect.suspend(() => {
+    const current = desktopResume;
+    desktopResume = undefined;
+    return current?.timer !== undefined ? Fiber.interrupt(current.timer) : Effect.void;
+  });
+  let scheduleDesktopResume: (delayMs: number) => Effect.Effect<void> = () => Effect.void;
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
     ThreadId,
@@ -500,6 +512,9 @@ export const make = Effect.gen(function* () {
     cachedRelayClient = undefined;
     publishConfirmDeadlines.clear();
     heldCompletions.clear();
+    suppressedThreads.clear();
+    suppressedTerminalIdentity.clear();
+    yield* cancelDesktopResume;
     yield* Ref.set(publishedStateByThreadRef, new Map());
   });
 
@@ -604,7 +619,72 @@ export const make = Effect.gen(function* () {
       pendingSubagentRequest: yield* currentSubagentRequestFor(threadId),
     });
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state, snapshot.subagentWait);
+    const terminalIdentity =
+      snapshot.state !== null &&
+      Option.isSome(thread) &&
+      (thread.value.latestRunId != null || thread.value.latestRunCompletedAt != null)
+        ? `${snapshot.state.phase}:${thread.value.latestRunId ?? ""}:${thread.value.latestRunCompletedAt != null ? DateTime.toEpochMillis(thread.value.latestRunCompletedAt) : ""}`
+        : publishIdentity;
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
+    const desktopRemainingMs = yield* backgroundPolicy.desktopActivityRemainingMs();
+    const isSuppressedTerminal = suppressedTerminalIdentity.get(threadId) === terminalIdentity;
+    if (desktopRemainingMs > 0 || isSuppressedTerminal) {
+      heldCompletions.delete(threadId);
+      const phase = snapshot.state?.phase ?? null;
+      const activeNonTerminal =
+        phase === "starting" ||
+        phase === "running" ||
+        phase === "waiting_for_approval" ||
+        phase === "waiting_for_input";
+      if (desktopRemainingMs > 0 && activeNonTerminal) {
+        publishConfirmDeadlines.delete(threadId);
+        suppressedTerminalIdentity.delete(threadId);
+        suppressedThreads.add(threadId);
+        yield* scheduleDesktopResume(desktopRemainingMs);
+        yield* Effect.logDebug(
+          "agent activity publish suppressed; desktop client recently active",
+          {
+            environmentId,
+            threadId,
+            reason: snapshot.reason,
+          },
+        );
+        return;
+      }
+      suppressedThreads.delete(threadId);
+      if (snapshot.state !== null) {
+        suppressedTerminalIdentity.set(threadId, terminalIdentity);
+        if (!hasLivePublishedState(publishedStateByThread, threadId)) {
+          publishConfirmDeadlines.delete(threadId);
+          yield* Effect.logDebug(
+            "agent activity publish suppressed; desktop client recently active",
+            {
+              environmentId,
+              threadId,
+              reason: snapshot.reason,
+            },
+          );
+          return;
+        }
+        yield* publishState({
+          projectId: snapshot.projectId,
+          state: null,
+          reason: "desktop-client-active",
+        }).pipe(withRelayClientTracing);
+        publishConfirmDeadlines.delete(threadId);
+        yield* Ref.update(publishedStateByThreadRef, (publishedStates) =>
+          new Map(publishedStates).set(threadId, CLEARED_PUBLISH_IDENTITY),
+        );
+        return;
+      }
+      if (!hasLivePublishedState(publishedStateByThread, threadId)) {
+        publishConfirmDeadlines.delete(threadId);
+        suppressedTerminalIdentity.delete(threadId);
+        return;
+      }
+    }
+    suppressedThreads.delete(threadId);
+    suppressedTerminalIdentity.delete(threadId);
     if (
       (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
       !hasLivePublishedState(publishedStateByThread, threadId)
@@ -820,6 +900,40 @@ export const make = Effect.gen(function* () {
   enqueueTopLevelPublish = enqueueThreadPublish;
   const publishThread: AgentAwarenessRelay["Service"]["publishThread"] = (threadId) =>
     enqueueThreadPublish(threadId).pipe(Effect.andThen(worker.drain));
+
+  const flushSuppressedThreads = Effect.gen(function* () {
+    yield* cancelDesktopResume;
+    if (suppressedThreads.size === 0) return;
+    const threadIds = [...suppressedThreads];
+    suppressedThreads.clear();
+    yield* Effect.forEach(threadIds, enqueueThreadPublish, { discard: true });
+  });
+
+  scheduleDesktopResume = Effect.fnUntraced(function* (delayMs: number) {
+    yield* cancelDesktopResume;
+    const entry = { timer: undefined as Fiber.Fiber<void> | undefined };
+    desktopResume = entry;
+    const timer = yield* Effect.sleep(delayMs).pipe(
+      Effect.andThen(
+        Effect.suspend(() => {
+          if (desktopResume !== entry) return Effect.void;
+          desktopResume = undefined;
+          return flushSuppressedThreads;
+        }),
+      ),
+      Effect.forkIn(scope),
+    );
+    if (desktopResume !== entry) {
+      yield* Fiber.interrupt(timer);
+    } else {
+      entry.timer = timer;
+    }
+  });
+
+  yield* Stream.runForEach(
+    backgroundPolicy.streamDesktopActivityUnavailable,
+    () => flushSuppressedThreads,
+  ).pipe(Effect.forkIn(scope));
 
   schedulePublishRetry = Effect.fnUntraced(function* (threadId: ThreadId) {
     const attempts = publishRetries.get(threadId)?.attempts ?? 0;

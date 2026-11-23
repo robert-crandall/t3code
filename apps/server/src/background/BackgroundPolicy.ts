@@ -4,6 +4,7 @@ import {
   type BackgroundScope,
   type ClientActivityLease,
   type ClientActivityReportInput,
+  type ClientKind,
   type HostPowerSnapshot,
   type RpcClientId,
 } from "@t3tools/contracts";
@@ -17,6 +18,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as HostPowerMonitor from "./HostPowerMonitor.ts";
@@ -36,11 +38,14 @@ export class BackgroundPolicy extends Context.Service<
     readonly snapshot: Effect.Effect<BackgroundPolicySnapshot>;
     readonly shouldRunScopeWork: (scope: BackgroundScope) => Effect.Effect<boolean>;
     readonly shouldRunOpportunisticWork: Effect.Effect<boolean>;
+    readonly desktopActivityRemainingMs: (windowMs?: number) => Effect.Effect<number>;
+    readonly streamDesktopActivityUnavailable: Stream.Stream<void>;
   }
 >()("t3/background/BackgroundPolicy") {}
 
 const DEFAULT_LEASE_TTL_MS = 45_000;
 const MAX_LEASE_TTL_MS = 120_000;
+const RECENT_DESKTOP_ACTIVITY_WINDOW_MS = 120_000;
 export const MAX_CLIENT_ACTIVITY_LEASES_PER_RPC_CLIENT = 16;
 
 function scopeKey(scope: BackgroundScope): string {
@@ -111,6 +116,14 @@ function upsertClientActivityLease(
 
 function isForegroundLease(lease: ClientActivityLease, now: DateTime.Utc): boolean {
   return isLeaseActive(lease, now) && lease.visible && (lease.focused || lease.recentlyInteracted);
+}
+
+function isDesktopClientKind(clientKind: ClientKind): boolean {
+  return clientKind === "desktop-renderer" || clientKind === "web";
+}
+
+function isHostUnavailableForDesktopActivity(hostPower: HostPowerSnapshot): boolean {
+  return !hostPower.stale && (hostPower.suspended || hostPower.locked === "true");
 }
 
 function leaseHasScope(lease: ClientActivityLease, scope: BackgroundScope): boolean {
@@ -196,6 +209,7 @@ export const make = Effect.fn("background.policy.make")(function* () {
   const hostPowerMonitor = yield* HostPowerMonitor.HostPowerMonitor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const leasesRef = yield* Ref.make(new Map<string, ClientActivityLease>());
+  const lastDesktopActivityAtRef = yield* Ref.make<DateTime.Utc | null>(null);
 
   const backgroundActivitySettings = serverSettings.getSettings.pipe(
     Effect.map(resolveServerBackgroundActivitySettings),
@@ -233,6 +247,9 @@ export const make = Effect.fn("background.policy.make")(function* () {
       expiresAt,
     };
     yield* Ref.update(leasesRef, (leases) => upsertClientActivityLease(leases, lease, now));
+    if (isDesktopClientKind(input.clientKind) && input.visible && input.recentlyInteracted) {
+      yield* Ref.set(lastDesktopActivityAtRef, now);
+    }
   });
 
   const removeRpcClient: BackgroundPolicy["Service"]["removeRpcClient"] = (
@@ -266,6 +283,28 @@ export const make = Effect.fn("background.policy.make")(function* () {
     (current) => current.shouldRunOpportunisticWork,
   );
 
+  const desktopActivityRemainingMs: BackgroundPolicy["Service"]["desktopActivityRemainingMs"] =
+    Effect.fn("BackgroundPolicy.desktopActivityRemainingMs")(function* (
+      windowMs = RECENT_DESKTOP_ACTIVITY_WINDOW_MS,
+    ) {
+      const [hostPower, lastDesktopActivityAt, now] = yield* Effect.all([
+        hostPowerMonitor.snapshot,
+        Ref.get(lastDesktopActivityAtRef),
+        DateTime.now,
+      ]);
+      if (lastDesktopActivityAt === null || isHostUnavailableForDesktopActivity(hostPower)) {
+        return 0;
+      }
+      const elapsedMs = DateTime.toEpochMillis(now) - DateTime.toEpochMillis(lastDesktopActivityAt);
+      const remainingMs = windowMs - elapsedMs;
+      return elapsedMs >= 0 && remainingMs > 0 ? remainingMs : 0;
+    });
+
+  const streamDesktopActivityUnavailable = hostPowerMonitor.streamChanges.pipe(
+    Stream.filter(isHostUnavailableForDesktopActivity),
+    Stream.as(undefined),
+  );
+
   yield* Effect.forever(
     Effect.sleep("15 seconds").pipe(
       Effect.andThen(
@@ -291,6 +330,8 @@ export const make = Effect.fn("background.policy.make")(function* () {
     snapshot,
     shouldRunScopeWork,
     shouldRunOpportunisticWork,
+    desktopActivityRemainingMs,
+    streamDesktopActivityUnavailable,
   });
 });
 

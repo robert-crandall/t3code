@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as BackgroundPolicy from "./BackgroundPolicy.ts";
@@ -64,7 +65,8 @@ function layerFor(
     }),
   );
   return BackgroundPolicy.layer.pipe(
-    Layer.provide(Layer.merge(layerHost, ServerSettings.layerTest(settingsOverrides))),
+    Layer.provide(ServerSettings.layerTest(settingsOverrides)),
+    Layer.provideMerge(layerHost),
   );
 }
 
@@ -247,5 +249,88 @@ describe("BackgroundPolicy", () => {
         ),
       ),
     ),
+  );
+
+  it.effect("tracks recent interactive desktop and web activity for two minutes", () =>
+    Effect.gen(function* () {
+      const policy = yield* BackgroundPolicy.BackgroundPolicy;
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("session-1"),
+        RpcClientId.make(1),
+        makeReport({ clientKind: "mobile", visible: true, recentlyInteracted: true }),
+      );
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("session-1"),
+        RpcClientId.make(2),
+        makeReport({
+          clientKind: "desktop-renderer",
+          visible: true,
+          focused: true,
+          recentlyInteracted: false,
+        }),
+      );
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("session-1"),
+        RpcClientId.make(2),
+        makeReport({
+          clientKind: "desktop-renderer",
+          visible: false,
+          focused: false,
+          recentlyInteracted: true,
+        }),
+      );
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("session-1"),
+        RpcClientId.make(2),
+        makeReport({
+          clientKind: "desktop-renderer",
+          visible: true,
+          focused: true,
+          recentlyInteracted: true,
+        }),
+      );
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 120_000);
+
+      yield* TestClock.adjust("119 seconds");
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 1_000);
+
+      yield* TestClock.adjust("1 second");
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+    }).pipe(Effect.provide(layerFor(nominalHostPower))),
+  );
+
+  it.effect("clears recent desktop activity immediately when host locks or suspends", () =>
+    Effect.gen(function* () {
+      const policy = yield* BackgroundPolicy.BackgroundPolicy;
+      const hostPower = yield* HostPowerMonitor.HostPowerMonitor;
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("session-1"),
+        RpcClientId.make(1),
+        makeReport({ clientKind: "web", visible: true, recentlyInteracted: true }),
+      );
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 120_000);
+
+      yield* hostPower.report({ ...nominalHostPower, locked: "true", stale: false });
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+
+      yield* hostPower.report({
+        ...nominalHostPower,
+        locked: "false",
+        suspended: true,
+        stale: false,
+      });
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 0);
+
+      yield* hostPower.report({ ...nominalHostPower, locked: "true", stale: true });
+      assert.equal(yield* policy.desktopActivityRemainingMs(), 120_000);
+    }).pipe(Effect.provide(layerFor(nominalHostPower))),
   );
 });
