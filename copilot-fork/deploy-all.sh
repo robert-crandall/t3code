@@ -5,7 +5,7 @@ export PATH="$HOME/.vite-plus/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/
 
 MAC_WORKTREE="${T3CODE_MAC_WORKTREE:-$HOME/repos/robert-crandall/t3code}"
 UBUNTU_HOST="${T3CODE_UBUNTU_HOST:-ubuntu}"
-UBUNTU_REPO="${T3CODE_UBUNTU_REPO:-/home/robert/repos/t3code}"
+UBUNTU_REPO="${T3CODE_UBUNTU_REPO:-/home/robert/repos/robert-crandall/t3code}"
 UBUNTU_MAC_PNPM_CACHE="${T3CODE_UBUNTU_MAC_PNPM_CACHE:-/home/robert/.cache/t3code-mac-pnpm}"
 MAC_PNPM_CACHE="${T3CODE_MAC_PNPM_CACHE:-$HOME/.cache/t3code-mac-pnpm}"
 STATE_DIR="$HOME/.local/state/t3code-custom"
