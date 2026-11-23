@@ -31,6 +31,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
 import * as EnvironmentKeys from "../cloud/environmentKeys.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import {
   PUBLISH_AGENT_ACTIVITY_SECRET,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
@@ -172,6 +173,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     readonly readShell?: (threadId: ThreadId) => Effect.Effect<OrchestrationV2ThreadShell | null>;
     readonly domainEvents?: Stream.Stream<OrchestrationV2DomainEvent>;
     readonly catchUpThreads?: ReadonlyArray<OrchestrationV2ThreadShell>;
+    readonly desktopActive?: boolean;
   } = {},
 ) {
   const values = new Map<string, Uint8Array>(
@@ -312,9 +314,32 @@ const makeTestRelay = Effect.fnUntraced(function* (
     updatedAt: NOW,
     deletedAt: null,
   };
+  const nowMs = (yield* DateTime.now).epochMilliseconds;
+  const desktopActiveUntilMs = yield* Ref.make<number | null>(
+    options.desktopActive ? nowMs + 120_000 : null,
+  );
+  const desktopUnavailableEvents = yield* Queue.unbounded<void>();
   const relay = yield* AgentAwarenessRelay.make.pipe(
     Effect.provide(EnvironmentKeys.layer),
     Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
+    Effect.provideService(
+      BackgroundPolicy.BackgroundPolicy,
+      BackgroundPolicy.BackgroundPolicy.of({
+        reportClientActivity: unused,
+        removeRpcClient: unused,
+        snapshot: unused(),
+        shouldRunScopeWork: unused,
+        shouldRunOpportunisticWork: unused(),
+        desktopActivityRemainingMs: () =>
+          Effect.gen(function* () {
+            const until = yield* Ref.get(desktopActiveUntilMs);
+            if (until === null) return 0;
+            const currentMs = (yield* DateTime.now).epochMilliseconds;
+            return Math.max(0, until - currentMs);
+          }),
+        streamDesktopActivityUnavailable: Stream.fromQueue(desktopUnavailableEvents),
+      }),
+    ),
     Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
     Effect.provideService(ServerEnvironment.ServerEnvironment, {
       getEnvironmentId: Effect.succeed(EnvironmentId.make("relay-environment")),
@@ -336,7 +361,17 @@ const makeTestRelay = Effect.fnUntraced(function* (
     Effect.provideService(FetchHttpClient.Fetch, fetch),
     Effect.provide(NodeCrypto.layer),
   );
-  return { relay, secrets, secretReads, currentShell, shellReads, publications, catchUp };
+  return {
+    relay,
+    secrets,
+    secretReads,
+    currentShell,
+    shellReads,
+    publications,
+    catchUp,
+    desktopActiveUntilMs,
+    desktopUnavailableEvents,
+  };
 });
 
 describe("AgentAwarenessRelay", () => {
@@ -1200,6 +1235,139 @@ describe("AgentAwarenessRelay", () => {
       Effect.scoped,
       Effect.provide(ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
     ),
+  );
+
+  it.effect(
+    "suppresses alerts while desktop is active and automatically republishes active waits when idle or locked",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe(NOW)));
+        const {
+          relay,
+          currentShell,
+          publications,
+          desktopActiveUntilMs,
+          desktopUnavailableEvents,
+        } = yield* makeTestRelay({
+          desktopActive: true,
+        });
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "waiting",
+            pendingRuntimeRequest: {
+              id: RuntimeRequestId.make("req-1"),
+              kind: "permission",
+              createdAt: DateTime.makeUnsafe(NOW),
+            },
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.deepEqual(publications, []);
+
+        yield* TestClock.adjust("120 seconds");
+        yield* relay.drain;
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["waiting_for_approval"],
+        );
+
+        const nowMs = (yield* DateTime.now).epochMilliseconds;
+        yield* Ref.set(desktopActiveUntilMs, nowMs + 120_000);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "waiting",
+            pendingRuntimeRequest: {
+              id: RuntimeRequestId.make("req-2"),
+              kind: "user_input",
+              createdAt: DateTime.makeUnsafe(NOW),
+            },
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["waiting_for_approval"],
+        );
+
+        yield* Ref.set(desktopActiveUntilMs, null);
+        yield* Queue.offer(desktopUnavailableEvents, undefined);
+        yield* TestClock.adjust("0 millis");
+        yield* relay.drain;
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["waiting_for_approval", "waiting_for_input"],
+        );
+      }),
+  );
+
+  it.effect(
+    "preserves live cards for active threads and retries silent clear on completion when desktop becomes active",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe(NOW)));
+        let attempts = 0;
+        const { relay, currentShell, publications, desktopActiveUntilMs } = yield* makeTestRelay({
+          respond: () => {
+            attempts += 1;
+            return attempts === 2
+              ? new Response("temporary error", { status: 500 })
+              : Response.json({ ok: true, deliveries: [] });
+          },
+        });
+        yield* relay.publishThread(THREAD_ID);
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running"],
+        );
+
+        const nowMs = (yield* DateTime.now).epochMilliseconds;
+        yield* Ref.set(desktopActiveUntilMs, nowMs + 120_000);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "waiting",
+            pendingRuntimeRequest: {
+              id: RuntimeRequestId.make("req-live-1"),
+              kind: "permission",
+              createdAt: DateTime.makeUnsafe(NOW),
+            },
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running"],
+        );
+
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:00:10.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running", null],
+        );
+
+        yield* TestClock.adjust("2 seconds");
+        yield* relay.drain;
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running", null, null],
+        );
+
+        yield* TestClock.adjust("120 seconds");
+        yield* relay.drain;
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running", null, null],
+        );
+      }),
   );
 });
 
