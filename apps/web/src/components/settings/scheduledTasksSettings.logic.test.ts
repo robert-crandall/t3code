@@ -447,6 +447,31 @@ it("appends the server zone only to fixed-time schedule labels", () => {
   expect(scheduleLabel({ type: "webhook", signature: null }, "24-hour", "Etc/UTC")).toBe(
     "On webhook",
   );
+  expect(scheduleLabel({ type: "cron", expression: "0 9-17 * * 1-5" }, "24-hour", "Etc/UTC")).toBe(
+    "Cron (0 9-17 * * 1-5) UTC",
+  );
+  expect(scheduleLabel({ type: "cron", expression: "0 9-17 * * 1-5" }, "24-hour")).toBe(
+    "Cron (0 9-17 * * 1-5)",
+  );
+});
+
+it("round-trips cron tasks through taskToDraft and rejects invalid cron expressions", () => {
+  const draft = taskToDraft({
+    ...legacyTask,
+    schedule: { type: "cron", expression: "*/30 9-16 * * MON-FRI" },
+  });
+  expect(draft.scheduleMode).toBe("cron");
+  expect(draft.cronExpression).toBe("*/30 9-16 * * MON-FRI");
+  expect(scheduleFromDraft(draft)).toEqual({
+    type: "cron",
+    expression: "*/30 9-16 * * MON-FRI",
+  });
+  expect(scheduleFromDraft({ ...draft, cronExpression: "  0   9-17 * * 1-5 " })).toEqual({
+    type: "cron",
+    expression: "0 9-17 * * 1-5",
+  });
+  expect(scheduleFromDraft({ ...draft, cronExpression: "0 0 9 * * 1-5" })).toBeNull();
+  expect(scheduleFromDraft({ ...draft, cronExpression: "0 0 30 2 *" })).toBeNull();
 });
 
 it("shows schedule times in the Time format setting", () => {

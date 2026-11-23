@@ -89,3 +89,20 @@ it.effect("an MCP edit cannot recreate a concurrently deleted schedule", () =>
     expect(result._tag).toBe("Failure");
   }).pipe(Effect.provide(layer)),
 );
+
+it.effect("updates a scheduled task to a cron schedule via MCP", () =>
+  Effect.gen(function* () {
+    const { schedules, id } = yield* fixture;
+    const mcp = yield* Mcp.OrchestratorMcpService;
+    const updated = yield* mcp.updateScheduledTask(client, {
+      scheduledTaskId: id,
+      schedule: { type: "cron", expression: "  */30   9-17 * * 1-5 " },
+    });
+    expect(updated.schedule).toEqual({ type: "cron", expression: "*/30 9-17 * * 1-5" });
+    expect(updated.nextRunAt).not.toBeNull();
+    expect((yield* schedules.list()).tasks[0]?.schedule).toEqual({
+      type: "cron",
+      expression: "*/30 9-17 * * 1-5",
+    });
+  }).pipe(Effect.provide(Mcp.layer.pipe(Layer.provideMerge(layer)))),
+);

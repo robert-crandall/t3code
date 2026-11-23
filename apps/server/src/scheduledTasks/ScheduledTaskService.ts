@@ -25,6 +25,7 @@ import {
   type ScheduledTaskThreadMode,
   type ScheduledTaskUpsertInput,
   managedPolicyDeniedMessage,
+  normalizeScheduledTaskCron,
   scheduledTaskThreadMode,
   managedRuntimeModeDenial,
 } from "@t3tools/contracts";
@@ -1542,7 +1543,9 @@ export const layer = Layer.effect(
             }
           : input.schedule.type === "once"
             ? { type: "once", runAt: iso(DateTime.makeUnsafe(input.schedule.runAt)) }
-            : input.schedule;
+            : input.schedule.type === "cron"
+              ? { type: "cron", expression: normalizeScheduledTaskCron(input.schedule.expression) }
+              : input.schedule;
       const webhook =
         input.schedule.type === "webhook"
           ? yield* Effect.gen(function* () {

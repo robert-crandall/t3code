@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 
-import { isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
+import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 
 describe("scheduled task schedule calculation", () => {
   it("skips to the next matching fixed-time weekday", () => {
@@ -81,5 +81,132 @@ describe("scheduled task schedule calculation", () => {
         { type: "fixed_time", timeOfDay: "09:00" },
       ),
     ).toBe(false);
+    expect(
+      isSameSchedule(
+        { type: "cron", expression: "0 9-17 * * 1-5" },
+        { type: "cron", expression: "  0   9-17  *  *  1-5 " },
+      ),
+    ).toBe(true);
+    expect(
+      isSameSchedule(
+        { type: "cron", expression: "0 9-17 * * 1-5" },
+        { type: "cron", expression: "*/30 9-17 * * 1-5" },
+      ),
+    ).toBe(false);
+    expect(
+      isSameSchedule(
+        { type: "cron", expression: "0 9 * * 1-5" },
+        { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] },
+      ),
+    ).toBe(false);
+  });
+
+  it("advances weekday working-hours cron schedules across weekends and within hours", () => {
+    // Friday 2026-07-03 17:30 -> Monday 2026-07-06 09:00
+    const afterHours = nextScheduledRunAt(
+      { type: "cron", expression: "0 9-17 * * 1-5" },
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 7, day: 3, hour: 17, minute: 30, second: 0, millisecond: 0 },
+        { timeZone: "America/Los_Angeles", adjustForTimeZone: true },
+      ),
+    );
+    const afterHoursParts = afterHours ? DateTime.toParts(afterHours) : null;
+    expect(afterHoursParts?.year).toBe(2026);
+    expect(afterHoursParts?.month).toBe(7);
+    expect(afterHoursParts?.day).toBe(6);
+    expect(afterHoursParts?.weekDay).toBe(1);
+    expect(afterHoursParts?.hour).toBe(9);
+    expect(afterHoursParts?.minute).toBe(0);
+
+    // Monday 2026-07-06 09:00 -> Monday 2026-07-06 09:30
+    const nextSlot = nextScheduledRunAt(
+      { type: "cron", expression: "*/30 9-16 * * MON-FRI" },
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 7, day: 6, hour: 9, minute: 0, second: 0, millisecond: 0 },
+        { timeZone: "America/Los_Angeles", adjustForTimeZone: true },
+      ),
+    );
+    const nextSlotParts = nextSlot ? DateTime.toParts(nextSlot) : null;
+    expect(nextSlotParts?.day).toBe(6);
+    expect(nextSlotParts?.hour).toBe(9);
+    expect(nextSlotParts?.minute).toBe(30);
+  });
+
+  it("preserves local wall clock across DST spring-forward and does not double-fire on fall-back", () => {
+    // Spring-forward: 2026-03-08 in America/Los_Angeles
+    const springNext = nextScheduledRunAt(
+      { type: "cron", expression: "0 9 * * *" },
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 3, day: 7, hour: 10, minute: 0, second: 0, millisecond: 0 },
+        { timeZone: "America/Los_Angeles", adjustForTimeZone: true },
+      ),
+    );
+    const springParts = springNext ? DateTime.toParts(springNext) : null;
+    expect(springParts?.month).toBe(3);
+    expect(springParts?.day).toBe(8);
+    expect(springParts?.hour).toBe(9);
+    expect(springParts?.minute).toBe(0);
+
+    // Spring-forward skipped hour: 2026-03-29 02:30 does not exist in Europe/Berlin
+    // (clocks jump 02:00 -> 03:00). Skip the nonexistent occurrence rather than shifting to 03:30.
+    const skippedHourNext = nextScheduledRunAt(
+      { type: "cron", expression: "30 2 * * *" },
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 3, day: 28, hour: 10, minute: 0, second: 0, millisecond: 0 },
+        { timeZone: "Europe/Berlin", adjustForTimeZone: true },
+      ),
+    );
+    const skippedHourParts = skippedHourNext ? DateTime.toParts(skippedHourNext) : null;
+    expect(skippedHourParts?.month).toBe(3);
+    expect(skippedHourParts?.day).toBe(30);
+    expect(skippedHourParts?.hour).toBe(2);
+    expect(skippedHourParts?.minute).toBe(30);
+
+    // Partial-hour spring-forward: 2026-10-04 jumps 02:00 -> 02:30 in Australia/Lord_Howe.
+    // Nonexistent 02:15 must be skipped without overshooting the valid 02:30 run,
+    // even when the shifted wall time (02:45) itself matches the cron.
+    const lordHoweBefore = DateTime.makeZonedUnsafe(
+      { year: 2026, month: 10, day: 3, hour: 10, minute: 0, second: 0, millisecond: 0 },
+      { timeZone: "Australia/Lord_Howe", adjustForTimeZone: true },
+    );
+    for (const expression of ["15,30 2 * * *", "15,30,45 2 * * *"]) {
+      const partialGapNext = nextScheduledRunAt({ type: "cron", expression }, lordHoweBefore);
+      const partialGapParts = partialGapNext ? DateTime.toParts(partialGapNext) : null;
+      expect(partialGapParts?.month).toBe(10);
+      expect(partialGapParts?.day).toBe(4);
+      expect(partialGapParts?.hour).toBe(2);
+      expect(partialGapParts?.minute).toBe(30);
+    }
+
+    // Fall-back: 2026-11-01 01:30 occurs twice in America/Los_Angeles
+    const firstOverlap = nextScheduledRunAt(
+      { type: "cron", expression: "30 1 * * *" },
+      DateTime.makeZonedUnsafe(
+        { year: 2026, month: 11, day: 1, hour: 0, minute: 30, second: 0, millisecond: 0 },
+        { timeZone: "America/Los_Angeles", adjustForTimeZone: true },
+      ),
+    );
+    expect(firstOverlap).not.toBeNull();
+    const afterOverlap = nextScheduledRunAt(
+      { type: "cron", expression: "30 1 * * *" },
+      firstOverlap!,
+    );
+    const afterOverlapParts = afterOverlap ? DateTime.toParts(afterOverlap) : null;
+    expect(afterOverlapParts?.month).toBe(11);
+    expect(afterOverlapParts?.day).toBe(2);
+    expect(afterOverlapParts?.hour).toBe(1);
+    expect(afterOverlapParts?.minute).toBe(30);
+  });
+
+  it("returns null for unmatchable cron expressions instead of throwing", () => {
+    const from = DateTime.makeUnsafe("2026-07-03T16:00:00.000Z");
+    expect(nextScheduledRunAt({ type: "cron", expression: "0 0 30 2 *" }, from)).toBeNull();
+  });
+
+  it("applies the missed-run grace window to cron schedules", () => {
+    const dueAt = DateTime.makeUnsafe("2026-07-03T16:00:00.000Z");
+    const schedule = { type: "cron", expression: "0 9-17 * * 1-5" } as const;
+    expect(isMissedFixedTimeRun(schedule, dueAt, DateTime.add(dueAt, { minutes: 5 }))).toBe(false);
+    expect(isMissedFixedTimeRun(schedule, dueAt, DateTime.add(dueAt, { minutes: 11 }))).toBe(true);
   });
 });

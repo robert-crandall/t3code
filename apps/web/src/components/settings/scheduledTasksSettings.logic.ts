@@ -1,4 +1,9 @@
-import { isListedThreadLineage, isWebhookDedupeTemplate } from "@t3tools/contracts";
+import {
+  isListedThreadLineage,
+  isWebhookDedupeTemplate,
+  normalizeScheduledTaskCron,
+  validateScheduledTaskCron,
+} from "@t3tools/contracts";
 import {
   EnvironmentId,
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
@@ -65,6 +70,12 @@ export function scheduleLabel(
       ? resolve(msg("Every {minutes} min", { minutes }))
       : resolve(msg("Every {seconds} sec", { seconds: Math.round(schedule.everyMs / 1000) }));
   }
+  if (schedule.type === "cron") {
+    const zone = scheduleTimeZoneLabel(timeZone, runAt);
+    return zone === undefined
+      ? resolve(msg("Cron ({expression})", { expression: schedule.expression }))
+      : resolve(msg("Cron ({expression}) {zone}", { expression: schedule.expression, zone }));
+  }
   const weekdays = schedule.weekdays ?? [];
   const time = formatTimeOfDay(schedule.timeOfDay, timestampFormat);
   const zone = scheduleTimeZoneLabel(timeZone, runAt);
@@ -111,7 +122,9 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
   };
 }
 
-export type ScheduleMode = "fixed" | "once" | "interval" | "webhook";
+export const DEFAULT_CRON_EXPRESSION = "0 9-17 * * 1-5";
+
+export type ScheduleMode = "fixed" | "cron" | "once" | "interval" | "webhook";
 export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
 
 export interface DraftState {
@@ -122,6 +135,7 @@ export interface DraftState {
   readonly scheduleMode: ScheduleMode;
   readonly intervalMinutes: string;
   readonly timeOfDay: string;
+  readonly cronExpression: string;
   /** Local date and time as a `datetime-local` input value, such as 2026-11-02T15:00. */
   readonly runAt: string;
   /** The stored ISO run time, sent back unchanged when the field was not edited. */
@@ -182,6 +196,19 @@ export function scheduleDraftErrors(draft: DraftState, resolve: MessageResolver 
   }
   if (draft.scheduleMode === "fixed" && !draft.timeOfDay)
     return invalidRunTime(resolve(msg("Pick a time.")));
+  if (draft.scheduleMode === "cron") {
+    if (validateScheduledTaskCron(draft.cronExpression) !== null) {
+      return [
+        {
+          title: resolve(msg("Invalid cron expression")),
+          description: resolve(
+            msg("Use 5 fields: minute, hour, day, month, weekday (for example, 0 9-17 * * 1-5)."),
+          ),
+        },
+      ];
+    }
+    return [];
+  }
   if (draft.scheduleMode !== "webhook") return [];
   if (parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes) === undefined)
     return [
@@ -302,6 +329,9 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
     const everyMs = Math.round(Number(draft.intervalMinutes) * 60_000);
     return { type: "interval", everyMs };
   }
+  if (draft.scheduleMode === "cron") {
+    return { type: "cron", expression: normalizeScheduledTaskCron(draft.cronExpression) };
+  }
   const selectedEveryDay = draft.weekdays.size === 0 || draft.weekdays.size === 7;
   return {
     type: "fixed_time",
@@ -327,6 +357,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
       schedule.type === "interval" ? String(Math.max(1, schedule.everyMs / 60_000)) : "15",
     // A time input shows nothing for an unpadded hour such as 9:05, which agents may save.
     timeOfDay: schedule.type === "fixed_time" ? schedule.timeOfDay.padStart(5, "0") : "09:00",
+    cronExpression: schedule.type === "cron" ? schedule.expression : DEFAULT_CRON_EXPRESSION,
     runAt: schedule.type === "once" ? toDateTimeLocalValue(new Date(schedule.runAt)) : "",
     savedRunAt: schedule.type === "once" ? schedule.runAt : "",
     weekdays,

@@ -11,6 +11,7 @@ import {
 import {
   createDraft,
   editDraft,
+  hasScheduledTaskDraftChanges,
   scheduledTaskDefaultModel,
   DEFAULT_SCHEDULE,
   scheduleDraftForTask,
@@ -111,6 +112,37 @@ describe("scheduleFromDraft", () => {
       ).toBeNull();
     },
   );
+
+  it("round-trips cron schedules, detects expression edits, and rejects invalid cron", () => {
+    const scheduleDraft = scheduleDraftForTask({
+      schedule: { type: "cron", expression: "*/30 9-16 * * MON-FRI" },
+    });
+    expect(scheduleDraft.mode).toBe("cron");
+    expect(scheduleDraft.cronExpression).toBe("*/30 9-16 * * MON-FRI");
+    expect(scheduleFromDraft(scheduleDraft)).toEqual({
+      type: "cron",
+      expression: "*/30 9-16 * * MON-FRI",
+    });
+    expect(scheduleFromDraft({ ...scheduleDraft, cronExpression: "  0   9-17 * * 1-5 " })).toEqual({
+      type: "cron",
+      expression: "0 9-17 * * 1-5",
+    });
+    expect(scheduleFromDraft({ ...scheduleDraft, cronExpression: "0 0 9 * * 1-5" })).toBeNull();
+    expect(scheduleFromDraft({ ...scheduleDraft, cronExpression: "0 0 30 2 *" })).toBeNull();
+
+    const initial = createDraft(null, null);
+    const edited = {
+      ...initial,
+      schedule: { ...initial.schedule, mode: "cron" as const, cronExpression: "*/15 9-17 * * 1-5" },
+    };
+    expect(hasScheduledTaskDraftChanges(initial, edited)).toBe(true);
+    expect(
+      hasScheduledTaskDraftChanges(edited, {
+        ...edited,
+        schedule: { ...edited.schedule, cronExpression: "0 9-17 * * 1-5" },
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("scheduled task model defaults", () => {

@@ -1,3 +1,5 @@
+import * as Cron from "effect/Cron";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import {
@@ -71,6 +73,50 @@ const ScheduledTaskOnceSchedule = Schema.Struct({
       (value) => isIsoWithOffset(value) || "Expected an ISO date and time with an offset.",
     ),
   ),
+});
+
+const MAX_CRON_EXPRESSION_LENGTH = 256;
+
+export function normalizeScheduledTaskCron(expression: string): string {
+  return expression.trim().replace(/\s+/g, " ");
+}
+
+export function validateScheduledTaskCron(expression: string): string | null {
+  const normalized = normalizeScheduledTaskCron(expression);
+  if (normalized.length === 0) {
+    return "Expected a 5-field cron expression (minute hour day month weekday).";
+  }
+  if (normalized.length > MAX_CRON_EXPRESSION_LENGTH) {
+    return "Cron expression is too long.";
+  }
+  if (normalized.split(" ").length !== 5) {
+    return "Expected a 5-field cron expression (minute hour day month weekday).";
+  }
+  const parsed = Cron.parse(normalized);
+  if (Result.isFailure(parsed)) {
+    return "Expected a valid 5-field cron expression (minute hour day month weekday).";
+  }
+  try {
+    Cron.next(parsed.success, 0);
+  } catch {
+    return "Cron expression does not match any valid date.";
+  }
+  return null;
+}
+
+const ScheduledTaskCronSchedule = Schema.Struct({
+  type: Schema.Literal("cron"),
+  expression: TrimmedNonEmptyString,
+});
+
+// Checked by filter, not pattern, to keep the MCP tool schema small.
+const ScheduledTaskUpsertCronSchedule = Schema.Struct({
+  type: Schema.Literal("cron"),
+  expression: TrimmedNonEmptyString.check(
+    Schema.makeFilter((value) => validateScheduledTaskCron(value) ?? true),
+  ).annotate({
+    description: "5-field cron in server local time, e.g. '0 9-17 * * 1-5'.",
+  }),
 });
 
 const ScheduledTaskWebhookSignatureFields = {
@@ -194,6 +240,7 @@ const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
 export const ScheduledTaskSchedule = Schema.Union([
   ScheduledTaskIntervalSchedule,
   ScheduledTaskFixedTimeSchedule,
+  ScheduledTaskCronSchedule,
   ScheduledTaskOnceSchedule,
   ScheduledTaskWebhookSchedule,
 ]);
@@ -209,6 +256,7 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
     }),
   }),
   ScheduledTaskFixedTimeSchedule,
+  ScheduledTaskUpsertCronSchedule,
   ScheduledTaskOnceSchedule,
   ScheduledTaskUpsertWebhookSchedule,
 ]);
@@ -271,7 +319,7 @@ export type ScheduledTaskListInput = typeof ScheduledTaskListInput.Type;
 
 export const ScheduledTaskListResult = Schema.Struct({
   tasks: ForwardCompatibleArray(ScheduledTask),
-  /** The server's IANA zone for fixed-time schedules. Absent from older servers. */
+  /** The server's IANA zone for fixed-time and cron schedules. Absent from older servers. */
   timeZone: Schema.optional(TrimmedNonEmptyString),
 });
 export type ScheduledTaskListResult = typeof ScheduledTaskListResult.Type;

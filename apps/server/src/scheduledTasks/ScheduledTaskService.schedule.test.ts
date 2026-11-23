@@ -129,6 +129,58 @@ it.effect("preserves a due run when a save only pads the scheduled hour", () =>
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
+it.effect("normalizes cron schedules and preserves due runs across whitespace-only edits", () =>
+  Effect.gen(function* () {
+    const dueAt = DateTime.makeZonedUnsafe(
+      { year: 2026, month: 7, day: 1, hour: 9, minute: 0, second: 0, millisecond: 0 },
+      { timeZone: DateTime.zoneMakeLocal(), adjustForTimeZone: true },
+    );
+    yield* TestClock.setTime(DateTime.toEpochMillis(dueAt) - 1_000);
+
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Scheduler.layer,
+      ManagedPolicy.layerTest(),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        isScratchProject: () => Effect.succeed(false),
+      }),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const input = yield* decodeUpsertInput({
+        commandId: "schedule-cron-format",
+        title: "Working hours check",
+        prompt: "Check status.",
+        enabled: true,
+        schedule: { type: "cron", expression: "  0   9-17  *  *  1-5  " },
+        projectId: "project-schedule-cron-format",
+        workspaceStrategy: { type: "root" },
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      const created = yield* service.upsert(input);
+      const expectedDueAt = DateTime.formatIso(DateTime.toUtc(dueAt));
+      expect(created.task.schedule).toEqual({ type: "cron", expression: "0 9-17 * * 1-5" });
+      expect(created.task.nextRunAt).toBe(expectedDueAt);
+
+      yield* TestClock.setTime(DateTime.toEpochMillis(dueAt) + 1_000);
+      const updated = yield* service.upsert(
+        yield* decodeUpsertInput({
+          ...input,
+          id: created.task.id,
+          schedule: { type: "cron", expression: "0 9-17 * * 1-5" },
+        }),
+      );
+      expect(updated.task.nextRunAt).toBe(expectedDueAt);
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
 it.effect("keeps the task list order when a toggle or edit rewrites updated_at", () =>
   Effect.gen(function* () {
     yield* TestClock.setTime(Date.parse("2026-07-01T09:00:00.000Z"));

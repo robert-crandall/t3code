@@ -1,6 +1,12 @@
-import { MIN_SCHEDULED_TASK_INTERVAL_MS, type ScheduledTaskSchedule } from "@t3tools/contracts";
+import {
+  MIN_SCHEDULED_TASK_INTERVAL_MS,
+  normalizeScheduledTaskCron,
+  type ScheduledTaskSchedule,
+} from "@t3tools/contracts";
+import * as Cron from "effect/Cron";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 
 const MINUTE_MS = 60_000;
 
@@ -25,6 +31,51 @@ export function nextScheduledRunAt(
   if (schedule.type === "interval") {
     // Intervals advance elapsed time, including across daylight-saving changes.
     return DateTime.addDuration(from, Math.max(schedule.everyMs, MIN_SCHEDULED_TASK_INTERVAL_MS));
+  }
+  if (schedule.type === "cron") {
+    const normalized = normalizeScheduledTaskCron(schedule.expression);
+    if (normalized.split(" ").length !== 5) return null;
+    const zone = DateTime.isZoned(from) ? from.zone : DateTime.zoneMakeNamedUnsafe("UTC");
+    const parsed = Cron.parse(normalized, zone);
+    if (Result.isFailure(parsed)) return null;
+    try {
+      let cursorMs = DateTime.toEpochMillis(from);
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        const candidate = Cron.next(parsed.success, cursorMs);
+        const candidateMs = candidate.getTime();
+        const scanStartMs = Math.max(
+          Math.floor(cursorMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS,
+          candidateMs - 120 * MINUTE_MS,
+        );
+        const matchesCandidate = Cron.match(parsed.success, candidate);
+        const crossedSpringForward =
+          DateTime.isZoned(from) &&
+          DateTime.zonedOffset(DateTime.setZone(DateTime.makeUnsafe(candidateMs), from.zone)) >
+            DateTime.zonedOffset(
+              DateTime.setZone(DateTime.makeUnsafe(scanStartMs - MINUTE_MS), from.zone),
+            );
+        let matchedMs: number | null = matchesCandidate ? candidateMs : null;
+        if (!matchesCandidate || crossedSpringForward) {
+          // A nonexistent spring-forward wall time shifts forward by the DST gap,
+          // which can overshoot an earlier valid match right after the gap (even if the shifted time also matches).
+          for (let ts = scanStartMs; ts < candidateMs; ts += MINUTE_MS) {
+            if (Cron.match(parsed.success, ts)) {
+              matchedMs = ts;
+              break;
+            }
+          }
+        }
+        if (matchedMs === null) {
+          cursorMs = candidateMs;
+          continue;
+        }
+        const next = DateTime.makeUnsafe(matchedMs);
+        return DateTime.isZoned(from) ? DateTime.setZone(next, from.zone) : next;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   const time = parseTimeOfDay(schedule.timeOfDay);
@@ -57,6 +108,12 @@ export function isSameSchedule(a: ScheduledTaskSchedule, b: ScheduledTaskSchedul
   }
   if (a.type === "webhook") return b.type === "webhook";
   if (a.type === "once") return b.type === "once" && Date.parse(a.runAt) === Date.parse(b.runAt);
+  if (a.type === "cron") {
+    return (
+      b.type === "cron" &&
+      normalizeScheduledTaskCron(a.expression) === normalizeScheduledTaskCron(b.expression)
+    );
+  }
   if (b.type !== "fixed_time") return false;
   // Compare parsed times so padded-hour edits do not reschedule pending runs.
   const aTime = parseTimeOfDay(a.timeOfDay);
@@ -77,6 +134,6 @@ export function isMissedFixedTimeRun(
   dueAt: DateTime.DateTime,
   now: DateTime.DateTime,
 ): boolean {
-  if (schedule.type !== "fixed_time") return false;
+  if (schedule.type !== "fixed_time" && schedule.type !== "cron") return false;
   return DateTime.toEpochMillis(now) - DateTime.toEpochMillis(dueAt) > MISSED_FIXED_TIME_GRACE_MS;
 }

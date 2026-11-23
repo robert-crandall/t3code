@@ -1,4 +1,9 @@
-import { isWebhookDedupeTemplate, scheduledTaskThreadMode } from "@t3tools/contracts";
+import {
+  isWebhookDedupeTemplate,
+  normalizeScheduledTaskCron,
+  scheduledTaskThreadMode,
+  validateScheduledTaskCron,
+} from "@t3tools/contracts";
 import type {
   ModelSelection,
   ServerConfig,
@@ -52,9 +57,12 @@ export function scheduledTaskDefaultModel(
   });
 }
 
+export const DEFAULT_CRON_EXPRESSION = "0 9-17 * * 1-5";
+
 export type ScheduleDraft = {
-  readonly mode: "fixed_time" | "once" | "interval" | "webhook";
+  readonly mode: "fixed_time" | "cron" | "once" | "interval" | "webhook";
   readonly timeOfDay: string;
+  readonly cronExpression: string;
   /** ISO time for a one-time run. Empty until the user picks the "Once" mode. */
   readonly runAt: string;
   readonly weekdays: ReadonlyArray<number>;
@@ -72,6 +80,7 @@ export type ScheduleDraft = {
 export const DEFAULT_SCHEDULE: ScheduleDraft = {
   mode: "fixed_time",
   timeOfDay: "09:00",
+  cronExpression: DEFAULT_CRON_EXPRESSION,
   runAt: "",
   weekdays: [1, 2, 3, 4, 5],
   intervalMinutes: "15",
@@ -96,6 +105,8 @@ export function scheduleDraftForTask(task: Pick<ScheduledTask, "schedule">): Sch
       };
     case "once":
       return { ...DEFAULT_SCHEDULE, mode: "once", runAt: task.schedule.runAt };
+    case "cron":
+      return { ...DEFAULT_SCHEDULE, mode: "cron", cronExpression: task.schedule.expression };
     case "interval":
       return {
         ...DEFAULT_SCHEDULE,
@@ -177,6 +188,10 @@ export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSche
     const runAt = new Date(draft.runAt);
     return Number.isNaN(runAt.getTime()) ? null : { type: "once", runAt: runAt.toISOString() };
   }
+  if (draft.mode === "cron") {
+    if (validateScheduledTaskCron(draft.cronExpression) !== null) return null;
+    return { type: "cron", expression: normalizeScheduledTaskCron(draft.cronExpression) };
+  }
   if (draft.mode === "interval") {
     const minutes = parseIntervalMinutes(draft.intervalMinutes);
     const everyMs = Math.round(minutes * 60_000);
@@ -229,6 +244,7 @@ function draftSignature(draft: ScheduledTaskDraft): string {
       .map((option) => [option.id, option.value]),
     draft.schedule.mode,
     draft.schedule.timeOfDay,
+    draft.schedule.cronExpression,
     draft.schedule.runAt,
     [...draft.schedule.weekdays].sort((a, b) => a - b),
     draft.schedule.intervalMinutes,
