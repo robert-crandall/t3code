@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "upstreamRepo": "pingdotgg/t3code",
   "forkRepo": "robert-crandall/t3code",
-  "integrationBranch": "copilot-custom",
+  "integrationBranch": "main",
   "upstreamBaseBranch": "main",
   "lastUpstreamMainSha": "fab237d62629925f271f4b48f2ffa4eedc95a271",
   "patches": [
