@@ -1324,6 +1324,13 @@ describe("AgentAwarenessRelay", () => {
 
         const nowMs = (yield* DateTime.now).epochMilliseconds;
         yield* Ref.set(desktopActiveUntilMs, nowMs + 120_000);
+        yield* Ref.set(currentShell, shell({ status: "starting" }));
+        yield* relay.publishThread(THREAD_ID);
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running"],
+        );
+
         yield* Ref.set(
           currentShell,
           shell({
@@ -1354,6 +1361,8 @@ describe("AgentAwarenessRelay", () => {
           ["running", null],
         );
 
+        // Even if desktop activity expires before the retry runs, the retry still clears silently.
+        yield* Ref.set(desktopActiveUntilMs, null);
         yield* TestClock.adjust("2 seconds");
         yield* relay.drain;
         assert.deepEqual(
