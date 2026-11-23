@@ -24,6 +24,7 @@ export const TOOL_GROUPS: ReadonlyArray<ToolGroup> = [
       "task_status",
       "task_cancel",
       "t3_workflow_stop",
+      "t3_workflow",
       "t3_background_wait",
     ],
   },
@@ -51,7 +52,7 @@ export const TOOL_GROUPS: ReadonlyArray<ToolGroup> = [
   {
     name: "user",
     description: "Ask the user for a secret, or send them a message before the turn ends.",
-    tools: ["request_secret", "send_to_user"],
+    tools: ["request_secret", "send_to_user", "t3_feedback"],
   },
   {
     name: "issues",
