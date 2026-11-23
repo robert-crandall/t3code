@@ -1372,9 +1372,59 @@ describe("AgentAwarenessRelay", () => {
 
         yield* TestClock.adjust("120 seconds");
         yield* relay.drain;
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
         assert.deepEqual(
           publications.map((publication) => publication.state?.phase ?? null),
           ["running", null, null],
+        );
+
+        // Newer work after desktop goes idle publishes normally again.
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunId: RunId.make("run-2"),
+            latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:03:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running", null, null, "completed"],
+        );
+
+        // A terminal completion suppressed with no live card also does not replay after desktop expires.
+        const activeNowMs = (yield* DateTime.now).epochMilliseconds;
+        yield* Ref.set(desktopActiveUntilMs, activeNowMs + 120_000);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunId: RunId.make("run-3"),
+            latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:04:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunId: RunId.make("run-4"),
+            latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:05:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* Ref.set(desktopActiveUntilMs, null);
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.deepEqual(
+          publications.map((publication) => publication.state?.phase ?? null),
+          ["running", null, null, "completed", null],
         );
       }),
   );
