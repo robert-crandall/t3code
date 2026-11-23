@@ -88,7 +88,9 @@ export type T3McpToolSummaryAction =
   | "device"
   | "html-preview"
   | "html-render"
-  | "send-to-user";
+  | "send-to-user"
+  | "tool-help"
+  | "tool-call";
 
 export interface T3McpToolDefinition {
   readonly displayName: string;
@@ -105,6 +107,9 @@ function tool(
 ): T3McpToolDefinition {
   return { displayName, labels, icon, summaryAction };
 }
+
+/** Runs another T3 tool for a client that lists only a few of them. */
+export const T3_CALL_TOOL_NAME = "t3_call";
 
 // Codex registers "t3-code-direct" for T3 tools kept out of Code Mode.
 const T3_MCP_SERVER_ALIASES = new Set([
@@ -359,6 +364,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Handle", "Handling", "Handled", "pending questions"],
     "question-respond",
   ),
+  t3_workflow: tool(["Use", "Using", "Used", "workflow runs"], "thread-send"),
   t3_submit_output: tool(["Submit", "Submitting", "Submitted", "the result"], "thread-send"),
   t3_queue_list: tool(["List", "Listing", "Listed", "queued messages"], "queue-list"),
   t3_queue_read: tool(["Read", "Reading", "Read", "a queued message"], "queue-read"),
@@ -440,6 +446,9 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   html_preview: tool(["Preview", "Previewing", "Previewed", "an HTML page"], "html-preview"),
   html_render: tool(["Render", "Rendering", "Rendered", "an HTML page"], "html-render"),
   send_to_user: tool(["Send", "Sending", "Sent", "a message"], "send-to-user"),
+  t3_help: tool(["Read", "Reading", "Read", "T3 tool help"], "tool-help"),
+  // Shown only when a call does not name its tool: adapters present the tool it wraps.
+  [T3_CALL_TOOL_NAME]: tool(["Call", "Calling", "Called", "a T3 tool"], "tool-call"),
 };
 
 export const T3_MCP_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(T3_MCP_TOOLS));

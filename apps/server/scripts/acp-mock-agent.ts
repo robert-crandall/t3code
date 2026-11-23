@@ -81,6 +81,7 @@ const loadReplyDelayMs = Number(process.env.T3_ACP_LOAD_REPLY_DELAY_MS ?? "0");
 const loadNeverReplies = process.env.T3_ACP_LOAD_NEVER_REPLIES === "1";
 const rejectPromptUntilLoaded = process.env.T3_ACP_REJECT_PROMPT_UNTIL_LOADED === "1";
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
+const echoAcceptedPrompt = process.env.T3_ACP_ECHO_ACCEPTED_PROMPT === "1";
 // JSON for the `data` of an "Internal error" response to `session/new`, as
 // Antigravity sends when its runtime cannot reach its local harness.
 const newSessionErrorData =
@@ -105,6 +106,7 @@ const terminalOutputBytes = Number(process.env.T3_ACP_EMIT_TERMINAL_OUTPUT_BYTES
 const supportsSessionLifecycle = process.env.T3_ACP_SESSION_LIFECYCLE === "1";
 const supportsAcpMcp = process.env.T3_ACP_MCP_ACP === "1";
 const supportsHttpMcp = process.env.T3_ACP_MCP_HTTP === "1";
+const supportsStdioMcp = process.env.T3_ACP_MCP_NO_STDIO !== "1";
 const supportsV2Management = process.env.T3_ACP_V2_MANAGEMENT === "1";
 const failDeleteSession = process.env.T3_ACP_FAIL_DELETE_SESSION === "1";
 const advertisedAuthMethodId = process.env.T3_ACP_AUTH_METHOD_ID?.trim();
@@ -559,9 +561,10 @@ const program = Effect.gen(function* () {
           session: {
             ...(supportsSessionLifecycle ? { fork: {}, additionalDirectories: {} } : {}),
             ...(supportsV2Management ? { delete: {} } : {}),
-            ...(supportsAcpMcp || supportsHttpMcp
+            ...(supportsStdioMcp || supportsAcpMcp || supportsHttpMcp
               ? {
                   mcp: {
+                    ...(supportsStdioMcp ? { stdio: {} } : {}),
                     ...(supportsAcpMcp ? { acp: {} } : {}),
                     ...(supportsHttpMcp ? { http: {} } : {}),
                   },
@@ -933,6 +936,15 @@ const program = Effect.gen(function* () {
         return yield* new AcpError.AcpRequestError({
           code: -32002,
           errorMessage: `Resource not found: ${requestedSessionId}`,
+        });
+      }
+      if (echoAcceptedPrompt) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text: "Accepted test prompt" },
+          },
         });
       }
       beginAcpMockPrompt(cancelledSessions, requestedSessionId);

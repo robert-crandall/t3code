@@ -1,3 +1,4 @@
+import type * as Digest from "effect/crypto/Digest";
 import {
   extractClaudeSubagentUpdate,
   extractClaudeSubagentSessionEvent,
@@ -20,9 +21,14 @@ import {
   makeCopilotSubagentRouting,
 } from "./copilotAcp.ts";
 import { prefersHttpMcpTransport } from "./mcpTransport.ts";
+import {
+  discoverCopilotSkills,
+  hasCopilotSkillMention,
+  rewriteCopilotSkillMentions,
+} from "./copilotSkills.ts";
 import { defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
-import { AcpRegistrySettings } from "../settings.ts";
+import { AcpRegistrySettings, isCopilotAcpRegistrySettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -186,10 +192,21 @@ const isHermes = (
   initializeResult: AcpSessionRuntime.AcpSessionRuntimeStartResult["initializeResult"],
 ) => initializeResult.agentInfo?.name === "hermes-agent";
 
+/** A local install launches the binary directly with no registry id, so detect it by basename. */
+export function matchesLocalAgentCommand(
+  commandPath: string,
+  source: string,
+  pattern: RegExp,
+): boolean {
+  return source === "local" && pattern.test(commandPath.split(/[\\/]/).pop() ?? "");
+}
+
 export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(function* (
   options: AcpRegistryAdapterV2Options,
 ) {
   const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const runtimeCoordinator = Option.getOrUndefined(
     yield* Effect.serviceOption(AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator),
   );
@@ -210,39 +227,42 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       /^opencode(?:-v2)?(\.exe|\.cmd)?$/i.test(
         options.settings.commandPath.split(/[\\/]/).pop() ?? "",
       ));
-  // Local installs launch the `copilot` binary directly with no registry id.
-  const isCopilot =
-    registryAgentId === "github-copilot-cli" ||
-    (options.settings.source === "local" &&
-      /^copilot(\.exe|\.cmd)?$/i.test(options.settings.commandPath.split(/[\\/]/).pop() ?? ""));
+  const isCopilot = isCopilotAcpRegistrySettings(options.settings);
   const isKimi =
     registryAgentId === "kimi-code" ||
-    (options.settings.source === "local" &&
-      /^kimi(\.exe|\.cmd)?$/i.test(options.settings.commandPath.split(/[\\/]/).pop() ?? ""));
+    matchesLocalAgentCommand(
+      options.settings.commandPath,
+      options.settings.source,
+      /^kimi(?:-code)?(\.exe|\.cmd)?$/i,
+    );
   const isClaude =
     registryAgentId === "claude-acp" ||
-    (options.settings.source === "local" &&
-      /^claude-agent-acp(\.exe|\.cmd)?$/i.test(
-        options.settings.commandPath.split(/[\\/]/).pop() ?? "",
-      ));
+    matchesLocalAgentCommand(
+      options.settings.commandPath,
+      options.settings.source,
+      /^claude-(?:agent-)?acp(\.exe|\.cmd)?$/i,
+    );
   const isDroid =
     registryAgentId === "factory-droid" ||
-    (options.settings.source === "local" &&
-      /^(?:factory-)?droid(\.exe|\.cmd)?$/i.test(
-        options.settings.commandPath.split(/[\\/]/).pop() ?? "",
-      ));
+    matchesLocalAgentCommand(
+      options.settings.commandPath,
+      options.settings.source,
+      /^(?:factory-)?droid(\.exe|\.cmd)?$/i,
+    );
   const isGlm =
     registryAgentId === "glm-acp-agent" ||
-    (options.settings.source === "local" &&
-      /^glm(?:-acp-agent)?(\.exe|\.cmd)?$/i.test(
-        options.settings.commandPath.split(/[\\/]/).pop() ?? "",
-      ));
+    matchesLocalAgentCommand(
+      options.settings.commandPath,
+      options.settings.source,
+      /^glm(?:-acp-agent)?(\.exe|\.cmd)?$/i,
+    );
   const isVibe =
     registryAgentId === "mistral-vibe" ||
-    (options.settings.source === "local" &&
-      /^(?:mistral-)?vibe(?:-acp)?(\.exe|\.cmd)?$/i.test(
-        options.settings.commandPath.split(/[\\/]/).pop() ?? "",
-      ));
+    matchesLocalAgentCommand(
+      options.settings.commandPath,
+      options.settings.source,
+      /^(?:mistral-)?vibe(?:-acp)?(\.exe|\.cmd)?$/i,
+    );
   const runtimeOptions = isClaude
     ? {
         ...options,
@@ -336,6 +356,17 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           registerExtensions: copilotRouting.registerExtensions,
           normalizeSessionUpdate: copilotRouting.normalizeSessionUpdate,
           extractSubagentUpdate: extractCopilotSubagentUpdate,
+          rewriteUserText: (text, turnInput) => {
+            if (!hasCopilotSkillMention(text)) return Effect.succeed(text);
+            return discoverCopilotSkills(turnInput.runtimePolicy.cwd, options.environment).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+              Effect.map((skills) =>
+                rewriteCopilotSkillMentions(text, new Set(skills.map((skill) => skill.name))),
+              ),
+            );
+          },
+          subagentsOwnedByRuntime: true,
           restartRuntimeAfterPromptError: isCopilotLostSessionError,
           // A finished background agent wakes the root after assistant.idle settled the run.
           enablePostSettleContinuation: true,
@@ -347,11 +378,24 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(runtimeCoordinator === undefined
       ? {}
       : {
+          // The command catalog is shared by every project on this instance, so it lists only
+          // personal skills; project skills stay slash commands, as other projects lack them.
           onAvailableCommandsUpdate: (commands) =>
-            runtimeCoordinator.publishAvailableCommands(
-              options.instanceId,
-              normalizeAcpRegistryCommands(commands),
-            ),
+            isCopilot
+              ? discoverCopilotSkills(undefined, options.environment).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                  Effect.flatMap((knownSkills) =>
+                    runtimeCoordinator.publishAvailableCommands(
+                      options.instanceId,
+                      normalizeAcpRegistryCommands(commands, knownSkills),
+                    ),
+                  ),
+                )
+              : runtimeCoordinator.publishAvailableCommands(
+                  options.instanceId,
+                  normalizeAcpRegistryCommands(commands),
+                ),
           // A new Copilot session starts at its own effort, not the one the composer shows.
           ...(isCopilot
             ? {
@@ -416,6 +460,7 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
 });
 
 export type AcpRegistryAdapterV2DriverEnv =
+  | Digest.Digest
   | ChildProcessSpawner.ChildProcessSpawner
   | SecureRandom.SecureRandom
   | FileSystem.FileSystem

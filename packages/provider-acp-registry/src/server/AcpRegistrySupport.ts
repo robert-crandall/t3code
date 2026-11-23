@@ -1747,27 +1747,17 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
   const search: AcpRegistryCatalog["Service"]["search"] = Effect.fn("AcpRegistryCatalog.search")(
     function* (input) {
       const registry = yield* recentRegistry();
-      const ranked = [];
-      const managerAvailability = new Map<string, boolean>();
-      for (const agent of registry.agents) {
+      const ranked = registry.agents.flatMap((agent) => {
         const distribution = resolveAcpRegistryDistribution({
           agent,
           preference: "auto",
           platformTarget,
         });
         const rank = searchRank(agent, input.query);
-        if (distribution === undefined || rank === undefined) continue;
-        const packageManager = packageManagerFor(distribution.kind);
-        if (packageManager !== undefined) {
-          let available = managerAvailability.get(packageManager);
-          if (available === undefined) {
-            available = (yield* resolveExecutable(packageManager, hostEnvironment)) !== undefined;
-            managerAvailability.set(packageManager, available);
-          }
-          if (!available) continue;
-        }
-        ranked.push({ agent, distribution, rank });
-      }
+        return distribution === undefined || rank === undefined
+          ? []
+          : [{ agent, distribution, rank }];
+      });
       ranked.sort(
         (left, right) =>
           left.rank - right.rank ||

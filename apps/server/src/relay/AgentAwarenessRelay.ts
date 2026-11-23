@@ -210,6 +210,14 @@ const RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000
 // Nothing else re-queues a thread when the network returns, so a lost terminal state is retried until it lands.
 const RELAY_AGENT_ACTIVITY_STEADY_RETRY_DELAY_MS = 60_000;
 
+const REDACTED_RELAY_PROJECT_TITLE = "Private project";
+const REDACTED_RELAY_THREAD_TITLE = "T3 Code";
+const REDACTED_RELAY_MODEL_TITLE = "Agent";
+
+function shouldRedactRelayActivity(): boolean {
+  return process.env.T3CODE_REDACT_RELAY_ACTIVITY === "true";
+}
+
 function sanitizeRelayAgentActivityState(
   state: RelayAgentActivityState | null,
 ): RelayAgentActivityState | null {
@@ -221,7 +229,15 @@ function sanitizeRelayAgentActivityState(
     ?.trim()
     .slice(0, RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH)
     .trim();
-  return detail ? { ...rest, detail } : rest;
+  const base = shouldRedactRelayActivity()
+    ? {
+        ...rest,
+        projectTitle: REDACTED_RELAY_PROJECT_TITLE,
+        threadTitle: REDACTED_RELAY_THREAD_TITLE,
+        modelTitle: REDACTED_RELAY_MODEL_TITLE,
+      }
+    : rest;
+  return detail ? { ...base, detail } : base;
 }
 
 function relayEnvironmentClient(token: string) {

@@ -10,7 +10,7 @@ import {
   deriveToolActivityPresentation,
   mergeToolActivityData,
 } from "@t3tools/shared/toolActivity";
-import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
+import { T3_CALL_TOOL_NAME, T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
 import type {
   OrchestrationV2ProviderThreadNativeMetadata,
   ThreadTokenUsageSnapshot,
@@ -61,9 +61,12 @@ type AcpAgentTerminalUpdate = Extract<
   { readonly sessionUpdate: "terminal_update" | "terminal_output_chunk" }
 >;
 
-const MAX_ACP_TERMINAL_OUTPUT_BYTES = 16 * 1024 * 1024;
-const ACP_TERMINAL_OUTPUT_TRIM_BYTES = 1024 * 1024;
-const MAX_ACP_TERMINAL_FRAME_BYTES = MAX_ACP_TERMINAL_OUTPUT_BYTES;
+// CommandOutputHub reads the last 256 KiB; retain more so its display cut stays unchanged.
+export const MAX_AGENT_TERMINAL_OUTPUT_CHARS = 320 * 1024;
+// A UTF-16 code unit is at most 3 UTF-8 bytes, so the post-trim floor still holds the projected tail.
+const MAX_ACP_TERMINAL_OUTPUT_BYTES = 4 * MAX_AGENT_TERMINAL_OUTPUT_CHARS;
+const ACP_TERMINAL_OUTPUT_TRIM_BYTES = 256 * 1024;
+const MAX_ACP_TERMINAL_FRAME_BYTES = 16 * 1024 * 1024;
 
 function isBase64DataCode(code: number): boolean {
   return (
@@ -1125,8 +1128,38 @@ const T3_MCP_BARE_TITLE_CALL = /^(?<tool>[A-Za-z0-9_]+)(?::\s*\{|$)/;
 // Antigravity titles calls "Running <tool>" or, from agy 1.5.8, "Run mcp_<server>_<tool>"; prompts end in "?".
 const ANTIGRAVITY_TOOL_TITLE = /^Run(?:ning)? (?<name>[^\s?]+)\??$/;
 
-/** ACP lacks typed MCP calls; recognize provider metadata and terminal fallback commands. */
+/**
+ * ACP lacks typed MCP calls; recognize provider metadata and terminal fallback commands.
+ * A `t3_call` is identified as the T3 tool it runs, so the rest of T3 sees that tool.
+ */
 export function extractMcpToolCallIdentity(
+  toolCall: AcpToolCallState,
+  options?: {
+    readonly embeddedTerminalCommands?: ReadonlyArray<string>;
+  },
+): AcpMcpToolCallIdentity | undefined {
+  const identity = extractDeclaredMcpToolCallIdentity(toolCall, options);
+  if (identity?.tool !== T3_CALL_TOOL_NAME || !/^t3[-_ ]?code$/i.test(identity.server)) {
+    return identity;
+  }
+  // Agents put the call's arguments at the top of rawInput or under `arguments`.
+  const rawInput = isRecord(toolCall.data.rawInput) ? toolCall.data.rawInput : undefined;
+  const call = [identity.input, rawInput, rawInput?.arguments].find(
+    (candidate): candidate is Record<string, unknown> & { readonly tool: string } =>
+      isRecord(candidate) &&
+      typeof candidate.tool === "string" &&
+      candidate.tool !== T3_CALL_TOOL_NAME,
+  );
+  // The arguments can arrive after the call starts; until then it shows as `t3_call`.
+  if (call === undefined) return identity;
+  return {
+    server: identity.server,
+    tool: call.tool,
+    input: isRecord(call.arguments) ? call.arguments : {},
+  };
+}
+
+function extractDeclaredMcpToolCallIdentity(
   toolCall: AcpToolCallState,
   options?: {
     readonly embeddedTerminalCommands?: ReadonlyArray<string>;

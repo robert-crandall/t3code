@@ -61,6 +61,10 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { FEEDBACK_CLI_CLIENT_LABEL } from "../feedback/FeedbackReport.ts";
+import * as Feedback from "../feedback/FeedbackService.ts";
+import * as FeedbackHandlers from "./toolkits/feedback/handlers.ts";
+import { FeedbackToolkit } from "./toolkits/feedback/tools.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import { PreviewToolkit } from "./toolkits/preview/tools.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
@@ -1719,6 +1723,135 @@ it.effect("hides tools for links and refuses another environment while the beta 
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("offers agent feedback tools only while the setting is on, to every client", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const agentScope: McpInvocationContext.McpThreadInvocationScope = {
+        environmentId,
+        requestNamespace: "agentToken",
+        thread: {
+          threadId: ThreadId.make("thread-feedback"),
+          providerSessionId: "agentToken",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+      // Any OAuth client can register under the label `t3 feedback` signs in with.
+      const cliScope: McpInvocationContext.McpInvocationScope = {
+        environmentId,
+        requestNamespace: "cliToken",
+        thread: undefined,
+        client: { sessionId: "cli", label: FEEDBACK_CLI_CLIENT_LABEL, access: "full-access" },
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+      const settingsContext = yield* Layer.build(ServerSettings.layerTest());
+      const settings = Context.get(settingsContext, ServerSettings.ServerSettingsService);
+      const serverLayer = McpHttpServer.layerMcpTransport(
+        Layer.mergeAll(
+          McpHttpServer.toolkitRegistration(FeedbackToolkit, FeedbackHandlers.layer),
+          McpHttpServer.layerToolGateway,
+        ),
+      ).pipe(
+        Layer.provide(Layer.succeedContext(settingsContext)),
+        Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
+        Layer.provide(Layer.mock(Feedback.FeedbackService)({})),
+        Layer.provide(
+          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            resolve: (token) => Effect.succeed(token === "agentToken" ? agentScope : undefined),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(McpHttpServer.McpClientAuthenticator)({
+            authenticate: (request) =>
+              Effect.succeed(
+                request.headers.authorization === "Bearer cliToken" ? cliScope : undefined,
+              ),
+          }),
+        ),
+      );
+      yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
+        Layer.build,
+      );
+      const httpClient = yield* HttpClient.HttpClient;
+      const rpc = (token: string, method: string, params: object) =>
+        Effect.gen(function* () {
+          const headers = {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+          };
+          const initialize = yield* httpClient.post("/mcp", {
+            headers,
+            body: HttpBody.text(
+              `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+              "application/json",
+            ),
+          });
+          const response = yield* httpClient.post("/mcp", {
+            headers: {
+              ...headers,
+              "mcp-session-id": initialize.headers["mcp-session-id"]!,
+              "mcp-protocol-version": "2025-06-18",
+            },
+            body: HttpBody.text(
+              JSON.stringify({ jsonrpc: "2.0", id: 2, method, params }),
+              "application/json",
+            ),
+          });
+          // tool_search answers as a stream, its result after the list_changed notice.
+          const text = yield* response.text;
+          const messages = text.startsWith("data:")
+            ? text
+                .split("\n")
+                .filter((line) => line.startsWith("data:"))
+                .map((line) => JSON.parse(line.slice(5)) as { readonly id?: number })
+            : [JSON.parse(text) as { readonly id?: number }];
+          return messages.find((message) => message.id === 2) as {
+            readonly result?: {
+              readonly tools?: ReadonlyArray<{ readonly name: string }>;
+              readonly structuredContent?: { readonly tools?: ReadonlyArray<{ name: string }> };
+              readonly content?: ReadonlyArray<{ readonly text: string }>;
+            };
+            readonly error?: unknown;
+          };
+        });
+      const listed = (token: string) =>
+        rpc(token, "tools/list", {}).pipe(
+          Effect.map((body) => body.result?.tools?.map((tool) => tool.name)),
+        );
+      // Only provider sessions can query t3_help.
+      const found = rpc("agentToken", "tools/call", {
+        name: "t3_help",
+        arguments: { path: "t3_feedback" },
+      }).pipe(
+        Effect.map((body) => body.result?.structuredContent?.tools?.map((tool) => tool.name) ?? []),
+      );
+      const report = (token: string) =>
+        rpc(token, "tools/call", {
+          name: "t3_feedback",
+          arguments: { kind: "bug", subject: "", expected: "a", actual: "b", workaround: "" },
+        });
+
+      expect(yield* found).toEqual([]);
+      for (const token of ["agentToken", "cliToken"]) {
+        expect(yield* listed(token)).toEqual([]);
+        // `t3 feedback` turns exactly this answer into the Labs message.
+        expect(yield* report(token)).toMatchObject({
+          error: { code: -32602, message: "Tool 't3_feedback' not found" },
+        });
+      }
+
+      yield* settings.updateSettings({ agentFeedback: { mode: "on-request" } });
+      expect(yield* found).toEqual(["t3_feedback"]);
+      for (const token of ["agentToken", "cliToken"]) {
+        expect(yield* listed(token)).toEqual(["t3_feedback"]);
+      }
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect(
   "lists watch tools only to threads that are not delegated children, and forge tools only where the project has a forge",
   () =>
@@ -1986,7 +2119,7 @@ it.effect(
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("lists optional tools to a deferring client only after tool_search loads them", () =>
+it.effect("gives a deferring client a fixed tool list and runs the rest through t3_call", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const scopeFor = (token: string): McpInvocationContext.McpThreadInvocationScope => ({
@@ -2005,17 +2138,29 @@ it.effect("lists optional tools to a deferring client only after tool_search loa
         ["deferringToken", scopeFor("deferringToken")],
         ["otherToken", scopeFor("otherToken")],
       ]);
-      const tool = (name: string, description: string) =>
+      const tool = <const Name extends string>(name: Name, description: string) =>
         Tool.make(name, {
           description,
           success: Schema.Struct({}),
           failure: OrchestratorMcpFailure,
           failureMode: "return",
         });
+      const ThemeSetTool = Tool.make("t3_theme_set", {
+        description: "Sets the theme.",
+        parameters: Schema.Struct({ themeId: Schema.String }),
+        success: Schema.Struct({ themeId: Schema.String, caller: Schema.String }),
+        failure: OrchestratorMcpFailure,
+        failureMode: "return",
+        dependencies: [McpInvocationContext.McpInvocationContext],
+      });
       const OptionalToolkit = Toolkit.make(
         tool("delegate_task", "Delegates a task."),
-        tool("preview_open", "Opens a browser preview."),
-        tool("schedule_task", "Schedules a task."),
+        tool("t3_theme_read", "Reads themes."),
+        ThemeSetTool,
+        tool("t3_environment_link", "Links an environment.").annotate(
+          McpSchema.EnabledWhen,
+          McpInvocationContext.hiddenWhileLinksOff,
+        ),
       );
       const reads = McpToolAccess.reads(() => Effect.succeed({}));
       const serverLayer = McpHttpServer.layerMcpTransport(
@@ -2024,11 +2169,18 @@ it.effect("lists optional tools to a deferring client only after tool_search loa
             OptionalToolkit,
             McpToolAccess.toLayer(OptionalToolkit, {
               delegate_task: reads,
-              preview_open: reads,
-              schedule_task: reads,
+              t3_theme_read: reads,
+              // Proves the wrapped call runs as the calling thread.
+              t3_theme_set: McpToolAccess.reads(({ themeId }) =>
+                Effect.map(McpInvocationContext.McpInvocationContext, (scope) => ({
+                  themeId,
+                  caller: scope.thread?.threadId ?? "none",
+                })),
+              ),
+              t3_environment_link: reads,
             }),
           ),
-          McpHttpServer.layerToolSearch,
+          McpHttpServer.layerToolGateway,
         ),
       ).pipe(
         Layer.provide(ServerSettings.layerTest()),
@@ -2043,36 +2195,56 @@ it.effect("lists optional tools to a deferring client only after tool_search loa
         Layer.build,
       );
       const httpClient = yield* HttpClient.HttpClient;
-      const session = (token: string, deferred: boolean) =>
+      // Copilot CLI speaks the stateless protocol: no `initialize`, and the client profile rides on each request.
+      const statelessMeta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": { name: "probe", version: "1.0.0" },
+      };
+      const session = (token: string, deferred: boolean, stateless = false) =>
         Effect.gen(function* () {
           const headers = {
             accept: "application/json, text/event-stream",
             authorization: `Bearer ${token}`,
             ...(deferred ? { "t3-tool-exposure": "deferred" } : {}),
           };
-          const initialize = yield* httpClient.post("/mcp", {
-            headers,
-            body: HttpBody.text(
-              `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
-              "application/json",
-            ),
-          });
+          const protocolHeaders = stateless
+            ? { "mcp-protocol-version": "2026-07-28" }
+            : {
+                "mcp-session-id": (yield* httpClient.post("/mcp", {
+                  headers,
+                  body: HttpBody.text(
+                    `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+                    "application/json",
+                  ),
+                })).headers["mcp-session-id"]!,
+                "mcp-protocol-version": "2025-06-18",
+              };
           const rpc = (method: string, params: object) =>
             httpClient
               .post("/mcp", {
                 headers: {
                   ...headers,
-                  "mcp-session-id": initialize.headers["mcp-session-id"]!,
-                  "mcp-protocol-version": "2025-06-18",
+                  ...protocolHeaders,
+                  ...(stateless
+                    ? {
+                        "mcp-method": method,
+                        ...("name" in params ? { "mcp-name": String(params.name) } : {}),
+                      }
+                    : {}),
                 },
                 body: HttpBody.text(
-                  JSON.stringify({ jsonrpc: "2.0", id: 2, method, params }),
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: 2,
+                    method,
+                    params: stateless ? { ...params, _meta: statelessMeta } : params,
+                  }),
                   "application/json",
                 ),
               })
               .pipe(
                 Effect.flatMap((response) => response.text),
-                // tool_search answers over SSE, after its list_changed notification.
                 Effect.map((text): unknown =>
                   text
                     .split("\n")
@@ -2091,23 +2263,64 @@ it.effect("lists optional tools to a deferring client only after tool_search loa
             ),
             call: (name: string, args: object) =>
               rpc("tools/call", { name, arguments: args }).pipe(
-                Effect.map((body) => (body as { result: { structuredContent?: unknown } }).result),
+                Effect.map(
+                  (body) =>
+                    (
+                      body as {
+                        result: {
+                          structuredContent?: unknown;
+                          isError?: boolean;
+                          content?: ReadonlyArray<{ text?: string }>;
+                        };
+                      }
+                    ).result,
+                ),
               ),
           };
         });
 
       const deferring = yield* session("deferringToken", true);
       const other = yield* session("otherToken", false);
-      expect(yield* deferring.listed).toEqual(["delegate_task", "tool_search"]);
-      expect(yield* other.listed).toEqual(["delegate_task", "preview_open", "schedule_task"]);
-      // Unlisted tools stay callable.
-      expect((yield* deferring.call("schedule_task", {})).structuredContent).toEqual({});
+      // Linked environments are off here, so `t3_environment_link` is hidden from both.
+      const everything = ["delegate_task", "t3_theme_read", "t3_theme_set"];
+      expect(yield* deferring.listed).toEqual(["delegate_task", "t3_call", "t3_help"]);
+      expect(yield* other.listed).toEqual(everything);
 
+      // A group returns its tools with their schemas, and a tool name returns that tool.
+      const theme = (yield* deferring.call("t3_help", { path: "theme" })).structuredContent as {
+        tools: ReadonlyArray<{ name: string; inputSchema: { required?: ReadonlyArray<string> } }>;
+      };
+      expect(theme.tools.map((listed) => listed.name)).toEqual(["t3_theme_read", "t3_theme_set"]);
+      expect(theme.tools[1]?.inputSchema.required).toEqual(["themeId"]);
       expect(
-        (yield* deferring.call("tool_search", { query: "browser" })).structuredContent,
-      ).toEqual({ tools: [{ name: "preview_open", description: "Opens a browser preview." }] });
-      expect(yield* deferring.listed).toEqual(["delegate_task", "preview_open", "tool_search"]);
-      expect(yield* other.listed).toEqual(["delegate_task", "preview_open", "schedule_task"]);
+        (yield* deferring.call("t3_help", { path: "t3_theme_read" })).structuredContent,
+      ).toMatchObject({ tools: [{ name: "t3_theme_read", description: "Reads themes." }] });
+      const hiddenGroup = yield* deferring.call("t3_help", { path: "environment" });
+      expect(hiddenGroup.isError).toBe(true);
+      expect(hiddenGroup.content?.[0]?.text).toContain("Groups:");
+
+      // The wrapped tool returns its own result and sees the caller.
+      expect(
+        (yield* deferring.call("t3_call", { tool: "t3_theme_set", arguments: { themeId: "dusk" } }))
+          .structuredContent,
+      ).toEqual({ themeId: "dusk", caller: "thread-deferringToken" });
+      const badArguments = yield* deferring.call("t3_call", { tool: "t3_theme_set" });
+      expect(badArguments.isError).toBe(true);
+      expect(badArguments.content?.[0]?.text).toContain('"required":["themeId"]');
+      const unknownTool = yield* deferring.call("t3_call", { tool: "t3_call" });
+      expect(unknownTool.isError).toBe(true);
+      expect(unknownTool.content?.[0]?.text).toContain('No T3 tool is named "t3_call"');
+
+      const stateless = yield* session("deferringToken", true, true);
+      expect(yield* stateless.listed).toEqual(["delegate_task", "t3_call", "t3_help"]);
+      expect(
+        (yield* stateless.call("t3_call", { tool: "t3_theme_set", arguments: { themeId: "dusk" } }))
+          .structuredContent,
+      ).toEqual({ themeId: "dusk", caller: "thread-deferringToken" });
+
+      // Nothing a call does changes either list.
+      expect(yield* deferring.listed).toEqual(["delegate_task", "t3_call", "t3_help"]);
+      expect(yield* other.listed).toEqual(everything);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

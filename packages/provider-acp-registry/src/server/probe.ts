@@ -12,6 +12,7 @@ import {
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import { AcpRegistrySettings } from "../settings.ts";
+import { discoverCopilotSkills, isCopilotAcpSettings } from "./copilotSkills.ts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -268,11 +269,6 @@ export function normalizeAcpRegistryLiveConfiguration(
   };
 }
 
-const emptyAcpRegistryAvailableCommands = (): AcpRegistryAvailableCommands => ({
-  slashCommands: [],
-  skills: [],
-});
-
 export function acpRegistryAdvertisesModelCatalog(
   configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
   modelState?: EffectAcpSchema.SessionModelState | null,
@@ -283,10 +279,13 @@ export function acpRegistryAdvertisesModelCatalog(
     (modelState?.availableModels?.length ?? 0) > 1
   );
 }
-
 export function normalizeAcpRegistryCommands(
   commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+  knownSkills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "path" | "scope" | "description">>,
 ): AcpRegistryAvailableCommands {
+  const knownByName = new Map(
+    (knownSkills ?? []).map((skill) => [skill.name.toLowerCase(), skill] as const),
+  );
   const seen = new Set<string>();
   const slashCommands: Array<ServerProviderSlashCommand> = [];
   const skills: Array<ServerProviderSkill> = [];
@@ -298,6 +297,8 @@ export function normalizeAcpRegistryCommands(
     seen.add(key);
     const description = boundedText(command.description, MAX_DESCRIPTION_LENGTH);
     const hint = command.input ? boundedText(command.input.hint, MAX_DESCRIPTION_LENGTH) : "";
+    // Copilot advertises skills without a `$` prefix. Match those names to discovered skills.
+    const knownSkill = name.startsWith("$") ? undefined : knownByName.get(key);
     if (name.startsWith("$")) {
       const skillName = boundedOpaqueValue(name.slice(1), MAX_ID_LENGTH);
       if (skillName === undefined) continue;
@@ -306,6 +307,16 @@ export function normalizeAcpRegistryCommands(
         ...(description ? { description } : {}),
         path: `acp://skill/${encodeURIComponent(skillName)}`,
         scope: "agent",
+        enabled: true,
+      });
+    } else if (knownSkill) {
+      skills.push({
+        name,
+        ...(description || knownSkill.description
+          ? { description: description || knownSkill.description }
+          : {}),
+        path: knownSkill.path,
+        ...(knownSkill.scope ? { scope: knownSkill.scope } : {}),
         enabled: true,
       });
     } else {
@@ -501,9 +512,7 @@ export const probeAcpRegistryConfiguration = Effect.fn("AcpRegistryProbe.probeCo
       const runtime = yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
         Effect.provide(runtimeContext),
       );
-      const commandsRef = yield* Ref.make<AcpRegistryAvailableCommands>(
-        emptyAcpRegistryAvailableCommands(),
-      );
+      const commandsRef = yield* Ref.make<ReadonlyArray<EffectAcpSchema.AvailableCommand>>([]);
       const commandsAdvertised = yield* Deferred.make<void>();
       const configOptionsRef = yield* Ref.make<
         ReadonlyArray<EffectAcpSchema.SessionConfigOption> | undefined
@@ -541,7 +550,7 @@ export const probeAcpRegistryConfiguration = Effect.fn("AcpRegistryProbe.probeCo
       yield* runtime.handleSessionUpdate((notification) => {
         const update = notification.update;
         if (update.sessionUpdate === "available_commands_update") {
-          return Ref.set(commandsRef, normalizeAcpRegistryCommands(update.availableCommands)).pipe(
+          return Ref.set(commandsRef, update.availableCommands).pipe(
             Effect.andThen(Deferred.succeed(commandsAdvertised, undefined)),
             Effect.asVoid,
           );
@@ -599,11 +608,14 @@ export const probeAcpRegistryConfiguration = Effect.fn("AcpRegistryProbe.probeCo
         (yield* runtime.getModeState) ?? parseSessionModeState(started.sessionSetupResult),
         started.sessionSetupResult.models,
       );
+      const knownSkills = isCopilotAcpSettings(input.settings)
+        ? yield* discoverCopilotSkills(undefined, input.environment)
+        : [];
 
       return {
         resolved,
         started,
-        commands: yield* Ref.get(commandsRef),
+        commands: normalizeAcpRegistryCommands(yield* Ref.get(commandsRef), knownSkills),
         liveConfiguration,
       };
     }).pipe(

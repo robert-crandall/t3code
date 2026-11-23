@@ -89,6 +89,9 @@ is running update the picker without waiting for another provider probe.
 
 Slash commands the agent provides appear under **Provider** in the `/` menu while a session is
 running. Commands the agent names with a `$` prefix appear in T3 Code's `$` skill menu instead.
+GitHub Copilot advertises skills as ordinary commands. T3 Code matches those names to your personal
+Copilot skills and plugins and lists them in the `$` menu. Choosing one sends `/skill-name`.
+Project skills stay in the `/` menu.
 
 ## Native sessions
 
@@ -131,9 +134,20 @@ Checkpoint rollback restores your files as usual. ACP agents cannot rewind their
 so the next turn after a rollback starts a fresh agent session and T3 Code sends it the kept
 conversation, without the turns you rolled back.
 
-Registry instances are not used for T3's app-owned text generation, such as thread titles, commit
-messages, branch names, or pull request descriptions. Configure a text-generation-capable provider
-for those actions.
+## Text generation
+
+GitHub Copilot can write T3's thread titles, commit messages, branch names, and pull request
+descriptions. Choose a Copilot model in **Settings → Threads → Text generation**. If
+**Settings → Source control → Source control writer model** is turned on, that model writes commit
+messages, branch names, and pull request text instead, so choose Copilot there too or turn it off.
+T3 Code never switches to Copilot on its own, because each request counts against your Copilot plan,
+so a low-cost model is a good choice. These requests run without tools, user-configured Copilot
+hooks, MCP servers, plugins, or custom instructions. Administrator-managed Copilot policy hooks still run.
+A `userPromptSubmitted` policy hook receives the text-generation prompt. These requests stay out
+of your Copilot session history. Copilot cannot write review guides, which need to read the checkout.
+
+Other Registry agents are not used for text generation. Configure another provider for those
+actions.
 
 ## Advanced configuration
 

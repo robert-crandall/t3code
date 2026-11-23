@@ -1804,6 +1804,39 @@ export function summarizeT3ToolCalls(
           );
       break;
     }
+    case "tool-help": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Read T3 tool help {count} time} other {Read T3 tool help {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to read T3 tool help {count} time} other {Tried to read T3 tool help {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "tool-call": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg("{count, plural, one {Called {count} T3 tool} other {Called {count} T3 tools}}", {
+              count,
+            }),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to call {count} T3 tool} other {Tried to call {count} T3 tools}}",
+              { count },
+            ),
+          );
+      break;
+    }
   }
   return { label, failedCount };
 }

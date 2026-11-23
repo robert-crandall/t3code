@@ -1474,3 +1474,41 @@ it.effect("catches up after startup without polling after success", () =>
     assert.equal(publications[1]?.state?.threadId, THREAD_ID);
   }),
 );
+
+const setRedactRelayActivityEnv = (value: string) => {
+  const previous = process.env.T3CODE_REDACT_RELAY_ACTIVITY;
+  process.env.T3CODE_REDACT_RELAY_ACTIVITY = value;
+  return () => {
+    if (previous === undefined) {
+      delete process.env.T3CODE_REDACT_RELAY_ACTIVITY;
+    } else {
+      process.env.T3CODE_REDACT_RELAY_ACTIVITY = previous;
+    }
+  };
+};
+
+it.effect("redacts project, thread, and model titles when T3CODE_REDACT_RELAY_ACTIVITY=true", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => setRedactRelayActivityEnv("true")),
+    () =>
+      Effect.gen(function* () {
+        const { relay, currentShell, publications } = yield* makeTestRelay();
+        yield* Ref.set(currentShell, shell({ title: "Secret feature work" }));
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.length, 1);
+        assert.include(publications[0]?.state, {
+          threadId: THREAD_ID,
+          projectTitle: "Private project",
+          threadTitle: "T3 Code",
+          modelTitle: "Agent",
+          phase: "running",
+          deepLink: `/threads/relay-environment/${THREAD_ID}`,
+        });
+
+        yield* Ref.set(currentShell, shell({ title: "Another secret title" }));
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.length, 1);
+      }),
+    (restore) => Effect.sync(restore),
+  ),
+);
