@@ -90,6 +90,13 @@ non-prod stages). Create the Hyperdrive config with `--caching-disabled true` so
 `SELECT ... FOR UPDATE` and read-after-write queries never hit cached results. Axiom, R2,
 PlanetScale, and Clerk are not required.
 
+This stack targets a fresh Alchemy stage. Because the legacy Axiom, PlanetScale, and Drizzle
+Alchemy providers were removed, deploying directly over an existing upstream stage that still holds
+those resources in Alchemy state will fail during planning with `MissingProviderError`. If migrating
+an existing upstream stage rather than deploying to a new Cloudflare account or stage, destroy or
+remove those legacy resources from Alchemy state before deploying this revision (back up or retain
+your production database first).
+
 Copy [`infra/relay/.env.example`](./.env.example) to `infra/relay/.env` and fill in the
 deployment-specific values before deploying:
 
