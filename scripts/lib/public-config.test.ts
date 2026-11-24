@@ -58,6 +58,10 @@ describe("loadRepoEnv", () => {
       NodePath.join(repoRoot, ".env"),
       "T3CODE_CLERK_PUBLISHABLE_KEY=pk_root\nT3CODE_RELAY_URL=https://relay.t3.codes\n",
     );
+    NodeFS.writeFileSync(
+      NodePath.join(repoRoot, ".env.local"),
+      "T3CODE_CLERK_PUBLISHABLE_KEY=pk_local\nT3CODE_RELAY_URL=https://relay-local.t3.codes\n",
+    );
 
     const isolatedEmpty = loadRepoEnv({
       baseEnv: { T3CODE_RELAY_URL: "" },

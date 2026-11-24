@@ -125,7 +125,8 @@ export T3CODE_MOBILE_UPDATES_ENABLED="${T3CODE_MOBILE_UPDATES_ENABLED:-0}"
 export EXPO_NO_GIT_STATUS=1
 export EXPO_NO_TELEMETRY=1
 
-if [[ "$MODE" == "archive" && -z "${T3CODE_IOS_BUILD_NUMBER:-}" ]]; then
+IOS_BUILD_NUMBER="${T3CODE_IOS_BUILD_NUMBER:-}"
+if [[ "$MODE" == "archive" && -z "${IOS_BUILD_NUMBER//[[:space:]]/}" ]]; then
   if [[ "$SKIP_PREBUILD" == "1" ]]; then
     echo "[build-ios] Refusing --archive --skip-prebuild without T3CODE_IOS_BUILD_NUMBER: CFBundleVersion is baked during prebuild. Omit --skip-prebuild or pass T3CODE_IOS_BUILD_NUMBER matching the last prebuild." >&2
     exit 1
@@ -180,23 +181,27 @@ CONFIG_META="$(printf '%s' "$CONFIG_JSON" | node -e '
     process.exit(1);
   }
   const hash = crypto.createHash("sha256").update(raw);
-  const pluginsDir = path.join(process.cwd(), "plugins");
-  if (fs.existsSync(pluginsDir)) {
-    const stack = [pluginsDir];
-    const files = [];
-    while (stack.length > 0) {
-      const dir = stack.pop();
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) stack.push(full);
-        else if (entry.isFile()) files.push(full);
-      }
+  const hashFile = (label, filePath) => {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      hash.update(label).update("\0").update(fs.readFileSync(filePath)).update("\0");
     }
-    files.sort();
+  };
+  const hashDir = (label, dirPath) => {
+    if (!fs.existsSync(dirPath)) return;
+    const files = fs
+      .readdirSync(dirPath, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => path.join(entry.parentPath, entry.name))
+      .sort();
     for (const file of files) {
-      hash.update(path.relative(pluginsDir, file)).update("\0").update(fs.readFileSync(file)).update("\0");
+      hashFile(`${label}/${path.relative(dirPath, file)}`, file);
     }
-  }
+  };
+  const repoRoot = path.resolve(process.cwd(), "../..");
+  hashDir("plugins", path.join(process.cwd(), "plugins"));
+  hashFile("mobile-package.json", path.join(process.cwd(), "package.json"));
+  hashFile("pnpm-lock.yaml", path.join(repoRoot, "pnpm-lock.yaml"));
+  hashDir("patches", path.join(repoRoot, "patches"));
   const fingerprint = hash.digest("hex");
   const relay = typeof parsed?.extra?.relay?.url === "string" ? parsed.extra.relay.url : "";
   const teamId = typeof parsed?.ios?.appleTeamId === "string" ? parsed.ios.appleTeamId : "";
@@ -224,12 +229,21 @@ if [[ "$SKIP_PREBUILD" == "1" ]]; then
 else
   echo "[build-ios] Running expo prebuild --clean --platform ios..."
   ./node_modules/.bin/expo prebuild --clean --platform ios
-  # Persist fork isolation env into ios/.xcode.env.local so direct Xcode GUI Run/Archive builds
-  # cannot fall back to root .env or upstream Ping defaults when EXConstants re-evaluates app.config.ts.
+  # Persist resolved fork isolation env into ios/.xcode.env.local (and unset omitted keys) so
+  # direct Xcode GUI Run/Archive builds cannot inherit login-shell upstream vars or root .env.
   node -e '
     const fs = require("node:fs");
     const target = process.argv[1];
-    const keys = [
+    const quote = (value) => `\x27${value.replace(/\x27/g, "\x27\\\x27\x27")}\x27`;
+    const aliasGroups = [
+      ["T3CODE_RELAY_URL", "VITE_T3CODE_RELAY_URL"],
+      ["T3CODE_CLERK_PUBLISHABLE_KEY", "VITE_CLERK_PUBLISHABLE_KEY", "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY"],
+      ["T3CODE_CLERK_JWT_TEMPLATE", "VITE_CLERK_JWT_TEMPLATE", "EXPO_PUBLIC_CLERK_JWT_TEMPLATE"],
+      ["T3CODE_MOBILE_OTLP_TRACES_URL", "EXPO_PUBLIC_OTLP_TRACES_URL"],
+      ["T3CODE_MOBILE_OTLP_TRACES_DATASET", "EXPO_PUBLIC_OTLP_TRACES_DATASET"],
+      ["T3CODE_MOBILE_OTLP_TRACES_TOKEN", "EXPO_PUBLIC_OTLP_TRACES_TOKEN"],
+    ];
+    const directKeys = [
       "APP_VARIANT",
       "T3CODE_MOBILE_IGNORE_REPO_ENV",
       "EXPO_NO_DOTENV",
@@ -240,24 +254,38 @@ else
       "T3CODE_MOBILE_APP_NAME",
       "T3CODE_MOBILE_SCHEME",
       "T3CODE_MOBILE_UPDATES_ENABLED",
+      "T3CODE_MOBILE_VERSION",
+      "MOBILE_VERSION_POLICY",
+      "T3_SHOWCASE_CAPTURE_BUILD",
       "T3CODE_IOS_PERSONAL_TEAM",
       "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID",
-      "T3CODE_RELAY_URL",
-      "T3CODE_CLERK_PUBLISHABLE_KEY",
-      "T3CODE_CLERK_JWT_TEMPLATE",
       "T3CODE_IOS_RELYING_PARTY",
       "T3CODE_EAS_PROJECT_ID",
       "T3CODE_EXPO_OWNER",
       "T3CODE_IOS_APPLE_SIGN_IN",
-      "EXPO_PUBLIC_OTLP_TRACES_URL",
-      "EXPO_PUBLIC_OTLP_TRACES_DATASET",
-      "EXPO_PUBLIC_OTLP_TRACES_TOKEN",
+      "EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID",
+      "EXPO_PUBLIC_CLERK_GOOGLE_IOS_CLIENT_ID",
+      "EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID",
+      "EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME",
+      "EXPO_PUBLIC_MARKETING_SITE_URL",
     ];
     const lines = ["", "# Private fork build isolation (written by copilot-fork/build-ios-app.sh)"];
-    for (const key of keys) {
+    for (const key of directKeys) {
       const value = process.env[key];
       if (value !== undefined) {
-        lines.push(`export ${key}=\x27${value.replace(/\x27/g, "\x27\\\x27\x27")}\x27`);
+        lines.push(`export ${key}=${quote(value)}`);
+      } else {
+        lines.push(`unset ${key}`);
+      }
+    }
+    for (const group of aliasGroups) {
+      const resolved = group.map((k) => process.env[k]?.trim()).find(Boolean);
+      for (const key of group) {
+        if (resolved !== undefined) {
+          lines.push(`export ${key}=${quote(resolved)}`);
+        } else {
+          lines.push(`unset ${key}`);
+        }
       }
     }
     fs.appendFileSync(target, `${lines.join("\n")}\n`, "utf8");
