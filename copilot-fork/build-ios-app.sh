@@ -41,10 +41,10 @@ Options:
 Environment overrides (also loaded from .env.ios.local if present):
   T3CODE_IOS_TEAM_ID               Apple Team ID (default: 7492ZAHAJV)
   T3CODE_IOS_BUNDLE_ID             iOS bundle ID (default: cloud.crandalls.t3code)
+  T3CODE_IOS_BUILD_NUMBER          iOS CFBundleVersion (auto UTC timestamp on --archive)
   T3CODE_MOBILE_APP_NAME           Display name (default: T3 Code)
   T3CODE_MOBILE_SCHEME             URL scheme (default: t3code-private)
   T3CODE_RELAY_URL                 Optional self-hosted Cloudflare relay HTTPS URL
-  T3CODE_HOSTED_APP_URL            Optional self-hosted web app HTTPS URL
   T3CODE_CLERK_PUBLISHABLE_KEY     Optional custom Clerk publishable key
   T3CODE_CLERK_JWT_TEMPLATE        Optional custom Clerk JWT template
   T3CODE_IOS_RELYING_PARTY         Optional custom Clerk relying party domain
@@ -74,28 +74,40 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+USER_ARCHIVE_PATH="0"
+if [[ -n "$ARCHIVE_PATH" ]]; then
+  USER_ARCHIVE_PATH="1"
+  if [[ "$ARCHIVE_PATH" != /* ]]; then
+    ARCHIVE_PATH="$(pwd)/$ARCHIVE_PATH"
+  fi
+  if [[ -e "$ARCHIVE_PATH" || -L "$ARCHIVE_PATH" ]]; then
+    echo "[build-ios] Refusing to overwrite existing --archive-path: $ARCHIVE_PATH" >&2
+    exit 1
+  fi
+fi
+
 # Load optional local overrides without clobbering env vars already set by caller.
 if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
-  while IFS='=' read -r raw_key raw_val || [[ -n "$raw_key" ]]; do
-    key="${raw_key#"${raw_key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    [[ -z "$key" || "$key" == \#* ]] && continue
+  while IFS= read -r -d '' key && IFS= read -r -d '' val; do
     if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
       echo "[build-ios] Ignoring invalid key in .env.ios.local: $key" >&2
       continue
     fi
-    val="${raw_val%$'\r'}"
-    val="${val#\"}"
-    val="${val%\"}"
-    val="${val#\'}"
-    val="${val%\'}"
     if [[ -z "${!key+x}" ]]; then
       export "$key=$val"
     fi
-  done < "$REPO_ROOT/.env.ios.local"
+  done < <(node -e '
+    const fs = require("node:fs");
+    const { parseEnv } = require("node:util");
+    const parsed = parseEnv(fs.readFileSync(process.argv[1], "utf8"));
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === "string") process.stdout.write(`${k}\0${v}\0`);
+    }
+  ' "$REPO_ROOT/.env.ios.local")
 fi
 
 export APP_VARIANT="${APP_VARIANT:-production}"
+export T3CODE_MOBILE_IGNORE_REPO_ENV=1
 export T3CODE_IOS_TEAM_ID="${T3CODE_IOS_TEAM_ID:-7492ZAHAJV}"
 export T3CODE_IOS_BUNDLE_ID="${T3CODE_IOS_BUNDLE_ID:-cloud.crandalls.t3code}"
 export T3CODE_MOBILE_APP_NAME="${T3CODE_MOBILE_APP_NAME:-T3 Code}"
@@ -103,6 +115,10 @@ export T3CODE_MOBILE_SCHEME="${T3CODE_MOBILE_SCHEME:-t3code-private}"
 export T3CODE_MOBILE_UPDATES_ENABLED="${T3CODE_MOBILE_UPDATES_ENABLED:-0}"
 export EXPO_NO_GIT_STATUS=1
 export EXPO_NO_TELEMETRY=1
+
+if [[ "$MODE" == "archive" && -z "${T3CODE_IOS_BUILD_NUMBER:-}" ]]; then
+  export T3CODE_IOS_BUILD_NUMBER="$(date -u +%Y%m%d%H%M)"
+fi
 
 if [[ "$PERSONAL_CAPABILITIES" == "1" ]]; then
   export T3CODE_IOS_PERSONAL_TEAM=1
@@ -119,18 +135,50 @@ if [[ ! -x "$MOBILE_DIR/node_modules/.bin/expo" ]]; then
   exit 1
 fi
 
-echo "[build-ios] mode=$MODE config=$CONFIGURATION team=$T3CODE_IOS_TEAM_ID bundle=$T3CODE_IOS_BUNDLE_ID scheme=$T3CODE_MOBILE_SCHEME personal_caps=$PERSONAL_CAPABILITIES"
-if [[ -n "${T3CODE_RELAY_URL:-}" ]]; then
-  echo "[build-ios] relay=$T3CODE_RELAY_URL"
+cd "$MOBILE_DIR"
+
+# Evaluate resolved Expo config before prebuild/xcodebuild and fail closed on upstream leakage.
+CONFIG_JSON="$(./node_modules/.bin/expo config --json)"
+CONFIG_META="$(node -e '
+  const crypto = require("node:crypto");
+  const raw = process.argv[1];
+  const forbidden = [
+    "t3.codes",
+    "pingdotgg",
+    "ARK85ZXQ4Z",
+    "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+    "api.axiom.co",
+  ];
+  const lower = raw.toLowerCase();
+  const leaked = forbidden.filter((token) => lower.includes(token.toLowerCase()));
+  if (leaked.length > 0) {
+    console.error(`[build-ios] Refusing build: resolved Expo config references upstream values: ${leaked.join(", ")}`);
+    process.exit(1);
+  }
+  const parsed = JSON.parse(raw);
+  const fingerprint = crypto.createHash("sha256").update(raw).digest("hex");
+  const relay = typeof parsed?.extra?.relay?.url === "string" ? parsed.extra.relay.url : "";
+  process.stdout.write(`${fingerprint}\t${relay}\n`);
+' "$CONFIG_JSON")"
+IFS=$'\t' read -r CONFIG_FINGERPRINT RESOLVED_RELAY <<< "$CONFIG_META"
+
+echo "[build-ios] mode=$MODE config=$CONFIGURATION team=$T3CODE_IOS_TEAM_ID bundle=$T3CODE_IOS_BUNDLE_ID scheme=$T3CODE_MOBILE_SCHEME build=${T3CODE_IOS_BUILD_NUMBER:-default} personal_caps=$PERSONAL_CAPABILITIES"
+if [[ -n "$RESOLVED_RELAY" ]]; then
+  echo "[build-ios] relay=$RESOLVED_RELAY"
 else
   echo "[build-ios] relay=(none - direct LAN/Tailscale pairing only; zero T3 Connect traffic)"
 fi
 
-cd "$MOBILE_DIR"
-
-if [[ "$SKIP_PREBUILD" != "1" ]]; then
+FINGERPRINT_FILE="$MOBILE_DIR/ios/.t3code-build-fingerprint"
+if [[ "$SKIP_PREBUILD" == "1" ]]; then
+  if [[ ! -f "$FINGERPRINT_FILE" ]] || [[ "$(cat "$FINGERPRINT_FILE")" != "$CONFIG_FINGERPRINT" ]]; then
+    echo "[build-ios] Refusing --skip-prebuild: existing apps/mobile/ios does not match current build configuration. Re-run without --skip-prebuild." >&2
+    exit 1
+  fi
+else
   echo "[build-ios] Running expo prebuild --clean --platform ios..."
   ./node_modules/.bin/expo prebuild --clean --platform ios
+  printf '%s\n' "$CONFIG_FINGERPRINT" > "$FINGERPRINT_FILE"
 fi
 
 WORKSPACE="$(find "$MOBILE_DIR/ios" -maxdepth 1 -name '*.xcworkspace' | head -n 1)"
@@ -183,7 +231,9 @@ case "$MODE" in
     ;;
   archive)
     ARCHIVE_OUT="${ARCHIVE_PATH:-$MOBILE_DIR/ios/build/${SCHEME}.xcarchive}"
-    rm -rf "$ARCHIVE_OUT"
+    if [[ "$USER_ARCHIVE_PATH" != "1" ]]; then
+      rm -rf "$ARCHIVE_OUT"
+    fi
     echo "[build-ios] Archiving $SCHEME ($CONFIGURATION) to $ARCHIVE_OUT..."
     xcodebuild \
       -workspace "$WORKSPACE" \

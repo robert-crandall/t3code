@@ -5,7 +5,9 @@ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
 type AppVariant = "development" | "preview" | "production";
 
-const repoEnv = loadRepoEnv();
+const repoEnv = loadRepoEnv({
+  loadFiles: process.env.T3CODE_MOBILE_IGNORE_REPO_ENV !== "1",
+});
 Object.assign(process.env, repoEnv);
 // Expo's TypeScript setup otherwise installs `typescript` on every start; we typecheck with tsrs.
 process.env.EXPO_NO_TYPESCRIPT_SETUP = "1";
@@ -20,24 +22,27 @@ const UPSTREAM_APPLE_TEAM_ID = "ARK85ZXQ4Z";
 const UPSTREAM_EAS_PROJECT_ID = "d763fcb8-d37c-41ea-a773-b54a0ab4a454";
 const UPSTREAM_EXPO_OWNER = "pingdotgg";
 
-const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
-const customIosBundleIdentifier = repoEnv.T3CODE_IOS_BUNDLE_ID?.trim();
-const customIosTeamId = repoEnv.T3CODE_IOS_TEAM_ID?.trim();
-const customAppName = repoEnv.T3CODE_MOBILE_APP_NAME?.trim();
-const customScheme = repoEnv.T3CODE_MOBILE_SCHEME?.trim();
-const customRelyingParty = repoEnv.T3CODE_IOS_RELYING_PARTY?.trim();
-const customHostedAppUrl = repoEnv.T3CODE_HOSTED_APP_URL?.trim();
-const customEasProjectId = repoEnv.T3CODE_EAS_PROJECT_ID?.trim();
-const customExpoOwner = repoEnv.T3CODE_EXPO_OWNER?.trim();
+const personalTeamBundleIdentifier =
+  repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim() || undefined;
+const customIosBundleIdentifier = repoEnv.T3CODE_IOS_BUNDLE_ID?.trim() || undefined;
+const customIosTeamId = repoEnv.T3CODE_IOS_TEAM_ID?.trim() || undefined;
+const customAppName = repoEnv.T3CODE_MOBILE_APP_NAME?.trim() || undefined;
+const customScheme = repoEnv.T3CODE_MOBILE_SCHEME?.trim() || undefined;
+const customRelyingParty = repoEnv.T3CODE_IOS_RELYING_PARTY?.trim() || undefined;
+const customEasProjectId = repoEnv.T3CODE_EAS_PROJECT_ID?.trim() || undefined;
+const customExpoOwner = repoEnv.T3CODE_EXPO_OWNER?.trim() || undefined;
+const customIosBuildNumber = repoEnv.T3CODE_IOS_BUILD_NUMBER?.trim() || undefined;
 
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/;
 const URL_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*$/;
+const IOS_BUILD_NUMBER_PATTERN = /^[0-9]+(?:\.[0-9]+)*$/;
 
 // Compiled into the native project. Without a relay, Observe's native side could dispatch to
 // Expo's own ingest before observe.ts turns it off; `.invalid` never resolves (RFC 6761).
-const observeEndpointUrl = repoEnv.T3CODE_RELAY_URL?.trim()
-  ? new URL("/v1/mobile/observe", repoEnv.T3CODE_RELAY_URL.trim()).toString()
+const relayUrl = repoEnv.T3CODE_RELAY_URL?.trim() || null;
+const observeEndpointUrl = relayUrl
+  ? new URL("/v1/mobile/observe", relayUrl).toString()
   : "https://observe.invalid";
 
 const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
@@ -61,6 +66,10 @@ if (customRelyingParty && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(customRelyingParty
   throw new Error("T3CODE_IOS_RELYING_PARTY must be a bare hostname such as clerk.example.com.");
 }
 
+if (customIosBuildNumber && !IOS_BUILD_NUMBER_PATTERN.test(customIosBuildNumber)) {
+  throw new Error("T3CODE_IOS_BUILD_NUMBER must be a dot-separated numeric string.");
+}
+
 const resolvedPersonalTeamBundleId = personalTeamBundleIdentifier || customIosBundleIdentifier;
 if (
   isIosPersonalTeamBuild &&
@@ -71,24 +80,6 @@ if (
     "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
   );
 }
-
-function parseHttpsHost(value: string | undefined, envName: string): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error(`${envName} must be a valid https:// URL.`);
-  }
-  if (parsed.protocol !== "https:" || !parsed.host) {
-    throw new Error(`${envName} must be a valid https:// URL.`);
-  }
-  return parsed.host;
-}
-
-const customHostedAppHost = parseHttpsHost(customHostedAppUrl, "T3CODE_HOSTED_APP_URL");
 
 const DEVELOPMENT_ASSETS = {
   appIcon: fromRepoRoot(BRAND_ASSET_PATHS.developmentIosIconPng),
@@ -177,17 +168,21 @@ const iosBundleIdentifier = isIosPersonalTeamBuild
   : (customIosBundleIdentifier ?? variant.iosBundleIdentifier);
 const appleTeamId = customIosTeamId ?? UPSTREAM_APPLE_TEAM_ID;
 const isCustomIosIdentity = Boolean(
-  isIosPersonalTeamBuild ||
-  iosBundleIdentifier !== variant.iosBundleIdentifier ||
-  appleTeamId !== UPSTREAM_APPLE_TEAM_ID,
+  (customIosBundleIdentifier && customIosBundleIdentifier !== variant.iosBundleIdentifier) ||
+  (customIosTeamId && customIosTeamId !== UPSTREAM_APPLE_TEAM_ID),
 );
+const keychainAccessBundleId = isCustomIosIdentity
+  ? iosBundleIdentifier
+  : variant.iosBundleIdentifier;
 
-const hostedAppHost = customHostedAppHost ?? (isCustomIosIdentity ? undefined : HOSTED_APP_HOST);
+const hostedAppHost = isCustomIosIdentity ? undefined : HOSTED_APP_HOST;
 const relyingParty = customRelyingParty ?? (isCustomIosIdentity ? undefined : variant.relyingParty);
-const associatedDomains = [
-  ...(relyingParty ? [`applinks:${relyingParty}`, `webcredentials:${relyingParty}`] : []),
-  ...(hostedAppHost ? [`applinks:${hostedAppHost}`] : []),
-];
+const associatedDomains = isIosPersonalTeamBuild
+  ? []
+  : [
+      ...(relyingParty ? [`applinks:${relyingParty}`, `webcredentials:${relyingParty}`] : []),
+      ...(hostedAppHost ? [`applinks:${hostedAppHost}`] : []),
+    ];
 
 const easProjectId =
   customEasProjectId ?? (isCustomIosIdentity ? undefined : UPSTREAM_EAS_PROJECT_ID);
@@ -318,29 +313,23 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
-  updates: updatesEnabled
-    ? {
-        enabled: true,
-        url: `https://u.expo.dev/${easProjectId}`,
-        checkAutomatically: "ON_LOAD",
-        fallbackToCacheTimeout: 0,
-      }
-    : {
-        enabled: false,
-        ...(easProjectId ? { url: `https://u.expo.dev/${easProjectId}` } : {}),
-        checkAutomatically: "NEVER",
-        fallbackToCacheTimeout: 0,
-      },
+  updates: {
+    enabled: updatesEnabled,
+    ...(easProjectId ? { url: `https://u.expo.dev/${easProjectId}` } : {}),
+    checkAutomatically: updatesEnabled ? "ON_LOAD" : "NEVER",
+    fallbackToCacheTimeout: 0,
+  },
   ios: {
     icon: variant.assets.iosIcon,
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
+    ...(customIosBuildNumber ? { buildNumber: customIosBuildNumber } : {}),
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
     appleTeamId,
     ...(associatedDomains.length > 0 ? { associatedDomains } : {}),
     entitlements: {
-      "keychain-access-groups": [`$(AppIdentifierPrefix)${iosBundleIdentifier}`],
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${keychainAccessBundleId}`],
     },
     infoPlist: {
       UISupportedInterfaceOrientations: [
@@ -554,11 +543,11 @@ const config: ExpoConfig = {
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
-      url: repoEnv.T3CODE_RELAY_URL ?? null,
+      url: relayUrl,
     },
     clerk: {
-      publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? null,
-      jwtTemplate: repoEnv.EXPO_PUBLIC_CLERK_JWT_TEMPLATE ?? null,
+      publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim() || null,
+      jwtTemplate: repoEnv.EXPO_PUBLIC_CLERK_JWT_TEMPLATE?.trim() || null,
     },
     // Clerk reads these exact names at prebuild. Omit unset values: manifest null becomes truthy {}.
     EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID,
@@ -567,10 +556,10 @@ const config: ExpoConfig = {
     EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME,
     observability: {
       tracesUrl:
-        repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL ??
+        repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL?.trim() ||
         (isCustomIosIdentity ? null : "https://api.axiom.co/v1/traces"),
-      tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET ?? null,
-      tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
+      tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET?.trim() || null,
+      tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN?.trim() || null,
     },
     eas: {
       ...(easProjectId ? { projectId: easProjectId } : {}),

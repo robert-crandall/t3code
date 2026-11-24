@@ -51,6 +51,34 @@ describe("loadRepoEnv", () => {
       VITE_T3CODE_RELAY_URL: "https://ci.example.test",
     });
   });
+
+  it("ignores root env files when loadFiles is false while preserving alias expansion", () => {
+    const repoRoot = makeTemporaryDirectory();
+    NodeFS.writeFileSync(
+      NodePath.join(repoRoot, ".env"),
+      "T3CODE_CLERK_PUBLISHABLE_KEY=pk_root\nT3CODE_RELAY_URL=https://relay.t3.codes\n",
+    );
+
+    const isolatedEmpty = loadRepoEnv({
+      baseEnv: { T3CODE_RELAY_URL: "" },
+      repoRoot,
+      loadFiles: false,
+    });
+    expect(isolatedEmpty.T3CODE_RELAY_URL).toBe("");
+    expect(isolatedEmpty.VITE_T3CODE_RELAY_URL).toBeUndefined();
+    expect(isolatedEmpty.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY).toBeUndefined();
+
+    const isolatedCustom = loadRepoEnv({
+      baseEnv: {
+        T3CODE_CLERK_PUBLISHABLE_KEY: "pk_private",
+        T3CODE_RELAY_URL: "https://relay.example.test",
+      },
+      repoRoot,
+      loadFiles: false,
+    });
+    expect(isolatedCustom.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY).toBe("pk_private");
+    expect(isolatedCustom.T3CODE_RELAY_URL).toBe("https://relay.example.test");
+  });
 });
 
 function makeTemporaryDirectory() {
