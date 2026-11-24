@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AcpRegistryOperationError,
+  DEFAULT_SERVER_SETTINGS,
   ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -19,6 +20,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.ts";
@@ -358,7 +360,7 @@ describe("acpRegistrySnapshotReadiness", () => {
     });
     expect(
       twoModels.find((model) => model.slug === "opus")?.capabilities?.optionDescriptors ?? [],
-    ).toEqual([sharedMode, ...liveOptions]);
+    ).toEqual([sharedMode]);
     // A later session on another model keeps the options learned for this one.
     const afterOpus = applyAcpRegistryLiveConfiguration(
       afterGlm,
@@ -481,10 +483,9 @@ describe("acpRegistrySnapshotReadiness", () => {
       vibeSession("mistral-large-4-0-3", ["low", "medium", "high"]),
       [],
     );
-    // Until its own session, a model borrows the current model's levels.
     expect(descriptors(onLarge)).toEqual([
       ["mistral-large-4-0-3", [thinking(["low", "medium", "high"])]],
-      ["mistral-medium-3.5", [thinking(["low", "medium", "high"])]],
+      ["mistral-medium-3.5", []],
     ]);
     const onMedium = applyAcpRegistryLiveConfiguration(
       onLarge,
@@ -495,85 +496,6 @@ describe("acpRegistrySnapshotReadiness", () => {
       ["mistral-large-4-0-3", [thinking(["low", "medium", "high"])]],
       ["mistral-medium-3.5", [thinking(["off", "high"])]],
     ]);
-  });
-
-  it("gives models no session opened the current model's reasoning options", () => {
-    const reasoning = {
-      id: "reasoning_effort",
-      label: "Reasoning Effort",
-      type: "select" as const,
-      options: [
-        { id: "low", label: "Low" },
-        { id: "high", label: "High" },
-      ],
-      currentValue: "high",
-      role: "reasoning" as const,
-    };
-    const autonomy = {
-      id: "autonomy",
-      label: "Autonomy Level",
-      type: "select" as const,
-      options: [{ id: "auto-low", label: "Low" }],
-      currentValue: "auto-low",
-    };
-    const snapshot = buildCheckedAcpRegistrySnapshot({
-      ...identity,
-      settings: decodeSettings({ agentId: "test-agent" }),
-      checkedAt: "2026-11-13T10:00:00.000Z",
-      inspection: {
-        status: "ready",
-        agentId: "test-agent",
-        version: "1.0.0",
-        distribution: "npx",
-      },
-      probe: {
-        probe: {
-          instanceId: identity.instanceId,
-          ready: true,
-          icon: null,
-          authMethods: [],
-          models: [
-            { id: "claude-sonnet-5-5", name: "Sonnet 5.5", description: null },
-            { id: "claude-opus-5-5", name: "Opus 5.5", description: null },
-          ],
-          currentModelId: "claude-sonnet-5-5",
-          configOptions: [reasoning, autonomy],
-          modelOptionIds: ["reasoning_effort"],
-          sessionManagement: noSessionManagement,
-        },
-        slashCommands: [],
-        skills: [],
-      },
-    });
-
-    expect(
-      snapshot.models.find((model) => model.slug === "claude-opus-5-5")?.capabilities
-        ?.optionDescriptors,
-    ).toEqual([autonomy, reasoning]);
-
-    // Without a probe session the "default" placeholder was never opened either.
-    const unprobed = buildCheckedAcpRegistrySnapshot({
-      ...identity,
-      settings: decodeSettings({ agentId: "test-agent" }),
-      checkedAt: "2026-11-13T10:00:00.000Z",
-      inspection: { status: "failed", message: "Probe failed." },
-    });
-    const live = applyAcpRegistryLiveConfiguration(
-      unprobed,
-      {
-        models: [
-          { id: "default", name: "Default", description: null },
-          { id: "claude-opus-5-5", name: "Opus 5.5", description: null },
-        ],
-        currentModelId: "claude-opus-5-5",
-        configOptions: [reasoning, autonomy],
-        modelOptionIds: ["reasoning_effort"],
-      },
-      [],
-    );
-    expect(
-      live.models.find((model) => model.slug === "default")?.capabilities?.optionDescriptors,
-    ).toEqual([autonomy, reasoning]);
   });
 
   it("projects discovery without claiming authentication when no login methods are advertised", () => {
@@ -921,37 +843,6 @@ describe("acpRegistryEnrichmentCache", () => {
 
     expect(replayed).toBe(cache);
     expect(replayed.entry?.expiresAt).toBe(1_000);
-
-    // A session on another model with its own option is also applied once.
-    const moved = {
-      ...settledConfiguration,
-      currentModelId: "qmodel",
-      configOptions: [
-        {
-          id: "effort",
-          label: "Effort",
-          type: "select" as const,
-          options: [{ id: "high", label: "High" }],
-          currentValue: "high",
-        },
-      ],
-      modelOptionIds: ["effort"],
-    };
-    const applied = updateAcpRegistryEnrichmentCache({
-      cache,
-      configuration: moved,
-      customModels: [],
-      now: 2_000,
-    });
-    expect(applied.generation).toBe(2);
-    expect(
-      updateAcpRegistryEnrichmentCache({
-        cache: applied,
-        configuration: moved,
-        customModels: [],
-        now: 3_000,
-      }),
-    ).toBe(applied);
   });
 
   it("updates the cache and promotes the expiry when live configuration discovers a catalog", () => {
@@ -1050,28 +941,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     });
   } else if (method === "session/new") {
     const modelIds = JSON.parse(readFileSync(process.argv[2], "utf8"));
-    const effortModelIds = process.argv[3] ? JSON.parse(readFileSync(process.argv[3], "utf8")) : [];
     send({
       id,
       result: {
         sessionId: "probe-session",
-        ...(effortModelIds.includes(modelIds[0])
-          ? {
-              configOptions: [
-                {
-                  id: "effort",
-                  name: "effort",
-                  category: "thought_level",
-                  type: "select",
-                  currentValue: "high",
-                  options: [
-                    { value: "low", name: "Low" },
-                    { value: "high", name: "High" },
-                  ],
-                },
-              ],
-            }
-          : {}),
         models: {
           currentModelId: modelIds[0],
           availableModels: modelIds.map((modelId) => ({ modelId, name: modelId })),
@@ -1085,6 +958,61 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         update: { sessionUpdate: "available_commands_update", availableCommands: [] },
       },
     });
+  } else {
+    send({ id, result: {} });
+  }
+});
+`;
+
+// Reports `effort` levels for its current model only and logs each model switch.
+const perModelEffortAgentSource = `
+import { appendFileSync, readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const [logPath, modelsPath] = process.argv.slice(2);
+const levels = JSON.parse(readFileSync(modelsPath, "utf8"));
+const modelIds = Object.keys(levels);
+let current = modelIds[0];
+const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+const configOptions = () => [
+  {
+    id: "model",
+    name: "Model",
+    category: "model",
+    type: "select",
+    currentValue: current,
+    options: modelIds.map((value) => ({ value, name: value })),
+  },
+  ...(levels[current] === null
+    ? []
+    : [
+        {
+          id: "effort",
+          name: "Effort",
+          category: "thought_level",
+          type: "select",
+          currentValue: levels[current][0],
+          options: levels[current].map((value) => ({ value, name: value })),
+        },
+      ]),
+];
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const { id, method, params } = JSON.parse(line);
+  if (id === undefined) return;
+  if (method === "initialize") {
+    send({ id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+  } else if (method === "session/new") {
+    send({ id, result: { sessionId: "probe-session", configOptions: configOptions() } });
+    send({
+      method: "session/update",
+      params: {
+        sessionId: "probe-session",
+        update: { sessionUpdate: "available_commands_update", availableCommands: [] },
+      },
+    });
+  } else if (method === "session/set_config_option" && params.configId === "model") {
+    appendFileSync(logPath, params.value + "\\n");
+    current = params.value;
+    send({ id, result: { configOptions: configOptions() } });
   } else {
     send({ id, result: {} });
   }
@@ -1250,13 +1178,9 @@ it.layer(driverLayer, { excludeTestServices: true })("AcpRegistryDriver", (it) =
       const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "acp-driver-" });
       const agentPath = path.join(directory, "agent.mjs");
       const modelsPath = path.join(directory, "models.json");
-      const effortModelsPath = path.join(directory, "effort-models.json");
-      const models = ["model-e", "model-a", "model-b", "model-c", "model-d"];
       yield* fileSystem.writeFileString(agentPath, fakeAgentSource);
-      yield* fileSystem.writeFileString(modelsPath, JSON.stringify(models.slice(1)));
-      yield* fileSystem.writeFileString(effortModelsPath, JSON.stringify([]));
+      yield* fileSystem.writeFileString(modelsPath, JSON.stringify(["model-a", "model-b"]));
       const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
-      let version = "1.0.0";
 
       const instance = yield* AcpRegistryDriver.create({
         instanceId: identity.instanceId,
@@ -1269,23 +1193,13 @@ it.layer(driverLayer, { excludeTestServices: true })("AcpRegistryDriver", (it) =
           ...catalogWithInspection({
             status: "ready",
             agentId: "test-agent",
-            version,
+            version: "1.0.0",
             distribution: "npx",
           }),
-          inspect: () =>
-            Effect.sync(() => ({
-              status: "ready" as const,
-              agentId: "test-agent",
-              version,
-              distribution: "npx" as const,
-            })),
           resolve: () =>
             Effect.succeed({
               distribution: "npx" as const,
-              spawn: {
-                command: process.execPath,
-                args: [agentPath, modelsPath, effortModelsPath],
-              },
+              spawn: { command: process.execPath, args: [agentPath, modelsPath] },
             }),
         }),
       );
@@ -1296,106 +1210,272 @@ it.layer(driverLayer, { excludeTestServices: true })("AcpRegistryDriver", (it) =
               `${model.slug}:${(model.capabilities?.optionDescriptors ?? []).map((option) => option.id).join("+")}`,
           )
           .join();
-      const waitFor = (slug: string, optionIds: string) =>
+      const waitFor = (expected: string) =>
         instance.snapshot.streamChanges.pipe(
-          Stream.filter((snapshot) =>
-            effortBySlug(snapshot).split(",").includes(`${slug}:${optionIds}`),
-          ),
+          Stream.filter((snapshot) => effortBySlug(snapshot) === expected),
           Stream.runHead,
         );
-      const session = (currentModelId: string, optionId?: string) =>
+      const session = (currentModelId: string) =>
         normalizeAcpRegistryLiveConfiguration(
-          optionId === undefined
-            ? []
-            : [
-                {
-                  id: optionId,
-                  name: optionId,
-                  category: "thought_level",
-                  type: "select",
-                  currentValue: "high",
-                  options: [
-                    { value: "low", name: "Low" },
-                    { value: "high", name: "High" },
-                  ],
-                },
+          [
+            {
+              id: "effort",
+              name: "Effort",
+              category: "thought_level",
+              type: "select",
+              currentValue: "high",
+              options: [
+                { value: "low", name: "Low" },
+                { value: "high", name: "High" },
               ],
+            },
+          ],
           undefined,
           {
             currentModelId,
-            availableModels: models.map((modelId) => ({ modelId, name: modelId })),
+            availableModels: [
+              { modelId: "model-a", name: "model-a" },
+              { modelId: "model-b", name: "model-b" },
+            ],
           },
         );
-      const publish = (currentModelId: string, optionId?: string) =>
-        Effect.gen(function* () {
-          const applied = yield* waitFor(currentModelId, optionId ?? "").pipe(
-            Effect.forkScoped({ startImmediately: true }),
-          );
-          yield* coordinator.publishLiveConfiguration(
-            identity.instanceId,
-            session(currentModelId, optionId),
-          );
-          yield* Fiber.join(applied);
-          return effortBySlug(yield* instance.snapshot.getSnapshot);
-        });
 
-      const probed = yield* waitFor("model-a", "").pipe(
+      const probed = yield* waitFor("model-a:,model-b:").pipe(
         Effect.forkScoped({ startImmediately: true }),
       );
       yield* instance.snapshot.refresh;
       yield* Fiber.join(probed);
-
-      const nextProbe = instance.snapshot.streamChanges.pipe(
-        Stream.filter((snapshot) => snapshot.nativeSessions !== undefined),
-        Stream.runHead,
-        Effect.map(Option.map(effortBySlug)),
+      const learned = yield* waitFor("model-a:effort,model-b:effort").pipe(
         Effect.forkScoped({ startImmediately: true }),
       );
+      yield* coordinator.publishLiveConfiguration(identity.instanceId, session("model-b"));
+      yield* coordinator.publishLiveConfiguration(identity.instanceId, session("model-a"));
+      yield* Fiber.join(learned);
 
-      // A fresh probe's view replaces the older probe's, even while a session runs another model.
-      expect(yield* publish("model-b", "effort")).toBe(
-        "model-e:effort,model-a:,model-b:effort,model-c:effort,model-d:effort",
-      );
-      yield* fileSystem.writeFileString(effortModelsPath, JSON.stringify(["model-a"]));
-      version = "1.0.1";
-      const effortProbed = yield* nextProbe;
       yield* instance.snapshot.refresh;
-      expect(yield* Fiber.join(effortProbed)).toEqual(
-        Option.some("model-e:effort,model-a:effort,model-b:effort,model-c:effort,model-d:effort"),
+      expect(effortBySlug(yield* instance.snapshot.getSnapshot)).toBe(
+        "model-a:effort,model-b:effort",
       );
+    }),
+  );
 
-      // A probe result is dropped while the cached one still lacks the live configuration,
-      // so a session reports again before the next update.
-      expect(yield* publish("model-c")).toBe(
-        "model-e:,model-a:effort,model-b:effort,model-c:,model-d:",
+  const makePerModelEffortAgent = Effect.fn("makePerModelEffortAgent")(function* (
+    levels: Readonly<Record<string, ReadonlyArray<string> | null>>,
+  ) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "acp-driver-" });
+    const agentPath = path.join(directory, "agent.mjs");
+    const logPath = path.join(directory, "switches.log");
+    const modelsPath = path.join(directory, "models.json");
+    yield* fileSystem.writeFileString(agentPath, perModelEffortAgentSource);
+    yield* fileSystem.writeFileString(logPath, "");
+    yield* fileSystem.writeFileString(modelsPath, JSON.stringify(levels));
+    return {
+      spawn: { command: process.execPath, args: [agentPath, logPath, modelsPath] },
+      modelSwitches: fileSystem
+        .readFileString(logPath)
+        .pipe(Effect.map((log) => log.split("\n").filter((line) => line.length > 0))),
+    };
+  });
+  const createRegistryInstance = (
+    instanceId: ProviderInstanceId,
+    spawn: { readonly command: string; readonly args: ReadonlyArray<string> },
+    version: string,
+  ) =>
+    AcpRegistryDriver.create({
+      instanceId,
+      displayName: identity.displayName,
+      enabled: true,
+      environment: [],
+      config: decodeSettings({ agentId: "test-agent" }),
+    }).pipe(
+      Effect.provideService(AcpRegistrySupport.AcpRegistryCatalog, {
+        ...catalogWithInspection({
+          status: "ready",
+          agentId: "test-agent",
+          version,
+          distribution: "npx",
+        }),
+        resolve: () => Effect.succeed({ distribution: "npx" as const, spawn }),
+      }),
+    );
+  const effortLevels = (snapshot: ServerProvider) =>
+    snapshot.models
+      .map((model) => {
+        const effort = model.capabilities?.optionDescriptors?.find(
+          (option) => option.id === "effort",
+        );
+        const levels = effort?.type === "select" ? effort.options.map((option) => option.id) : [];
+        return `${model.slug}:${levels.join("+")}`;
+      })
+      .join();
+  const refreshUntilEffortLevels = (
+    instance: Effect.Success<ReturnType<typeof createRegistryInstance>>,
+    expected: string,
+  ) =>
+    Effect.gen(function* () {
+      const reached = yield* instance.snapshot.streamChanges.pipe(
+        Stream.filter((snapshot) => effortLevels(snapshot) === expected),
+        Stream.runHead,
+        Effect.forkScoped({ startImmediately: true }),
       );
-
-      // An update moves the agent's default; model-a still keeps what the probe saw.
-      yield* fileSystem.writeFileString(modelsPath, JSON.stringify(models));
-      version = "1.1.0";
-      const reprobed = yield* nextProbe;
       yield* instance.snapshot.refresh;
-      expect(yield* Fiber.join(reprobed)).toEqual(
-        Option.some("model-e:,model-a:effort,model-b:effort,model-c:,model-d:"),
-      );
+      yield* Fiber.join(reached);
+    });
 
-      // The probe saw model-e without effort; models no session opened borrow the current one's.
-      expect(yield* publish("model-b", "effort")).toBe(
-        "model-e:,model-a:effort,model-b:effort,model-c:,model-d:effort",
-      );
-      expect(yield* publish("model-e", "depth")).toBe(
-        "model-e:depth,model-a:effort,model-b:effort,model-c:,model-d:depth",
-      );
-      expect(yield* publish("model-b", "thinking")).toBe(
-        "model-e:depth,model-a:effort,model-b:thinking,model-c:,model-d:thinking",
-      );
+  // A session's report: the model select plus the current model's own effort levels.
+  const liveSession = (
+    models: ReadonlyArray<string>,
+    model: string,
+    levels: ReadonlyArray<string>,
+  ) =>
+    normalizeAcpRegistryLiveConfiguration([
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: model,
+        options: models.map((value) => ({ value, name: value })),
+      },
+      {
+        id: "effort",
+        name: "Effort",
+        category: "thought_level",
+        type: "select",
+        currentValue: levels[0]!,
+        options: levels.map((value) => ({ value, name: value })),
+      },
+    ]);
 
-      // The probe still reports model-e without options; what its live session reported wins.
-      const replayed = yield* nextProbe;
-      yield* instance.snapshot.refresh;
-      expect(yield* Fiber.join(replayed)).toEqual(
-        Option.some("model-e:depth,model-a:effort,model-b:thinking,model-c:,model-d:thinking"),
+  it.effect("reads each visible model's own reasoning levels before its first session", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("acpRegistry_discovery");
+      yield* (yield* TestProviderHost.TestProviderHostSettings).set({
+        ...DEFAULT_SERVER_SETTINGS,
+        favorites: [{ provider: instanceId, model: "fav" }],
+        providerModelPreferences: { [instanceId]: { hiddenModels: ["hidden"], modelOrder: [] } },
+      });
+      const agent = yield* makePerModelEffortAgent({
+        default: ["medium", "high"],
+        plain: null,
+        other: ["low", "high"],
+        hidden: ["low"],
+        fav: ["none", "max"],
+      });
+      const instance = yield* createRegistryInstance(instanceId, agent.spawn, "1.0.0");
+
+      yield* refreshUntilEffortLevels(
+        instance,
+        "default:medium+high,plain:,other:low+high,hidden:,fav:none+max",
       );
+      // Favorites first, hidden models skipped, then the agent's own model restored.
+      expect(yield* agent.modelSwitches).toEqual(["fav", "plain", "other", "default"]);
+
+      // What a live session reports for a model outranks what discovery read for it.
+      const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
+      const models = ["default", "plain", "other", "hidden", "fav"];
+      const live = yield* instance.snapshot.streamChanges.pipe(
+        Stream.filter(
+          (snapshot) =>
+            effortLevels(snapshot) === "default:high,plain:,other:xhigh,hidden:,fav:none+max",
+        ),
+        Stream.runHead,
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* coordinator.publishLiveConfiguration(
+        instanceId,
+        liveSession(models, "other", ["xhigh"]),
+      );
+      yield* coordinator.publishLiveConfiguration(
+        instanceId,
+        liveSession(models, "default", ["high"]),
+      );
+      expect(Option.isSome(yield* Fiber.join(live))).toBe(true);
+    }),
+  );
+
+  it.effect("reads every model of a catalog larger than one discovery batch in one refresh", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("acpRegistry_large_catalog");
+      const others = Array.from({ length: 30 }, (_, index) => `model-${index}`);
+      yield* (yield* TestProviderHost.TestProviderHostSettings).set({
+        ...DEFAULT_SERVER_SETTINGS,
+        providerModelPreferences: {
+          [instanceId]: { hiddenModels: [], modelOrder: [...others, "opus"] },
+        },
+      });
+      const agent = yield* makePerModelEffortAgent({
+        sonnet: ["medium"],
+        ...Object.fromEntries(others.map((slug) => [slug, ["low"]])),
+        opus: ["high", "max"],
+      });
+      const instance = yield* createRegistryInstance(instanceId, agent.spawn, "1.0.0");
+
+      yield* refreshUntilEffortLevels(
+        instance,
+        ["sonnet:medium", ...others.map((slug) => `${slug}:low`), "opus:high+max"].join(),
+      );
+      expect(yield* agent.modelSwitches).toEqual([...others, "opus", "sonnet"]);
+    }),
+  );
+
+  it.effect("keeps discovered reasoning levels across restarts until the agent updates", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("acpRegistry_persisted");
+      const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
+      const agent = yield* makePerModelEffortAgent({
+        default: ["medium", "high"],
+        other: ["low", "high"],
+      });
+      const runInstance = (
+        version: string,
+        expected: string,
+        then: (
+          instance: Effect.Success<ReturnType<typeof createRegistryInstance>>,
+        ) => Effect.Effect<void, never, Scope.Scope> = () => Effect.void,
+      ) =>
+        Effect.scoped(
+          createRegistryInstance(instanceId, agent.spawn, version).pipe(
+            Effect.tap((instance) => refreshUntilEffortLevels(instance, expected)),
+            Effect.flatMap(then),
+          ),
+        );
+
+      yield* runInstance("1.0.0", "default:medium+high,other:low+high");
+      expect(yield* agent.modelSwitches).toEqual(["other", "default"]);
+
+      // Reused after a restart; a live session then replaces the stored levels.
+      yield* runInstance("1.0.0", "default:medium+high,other:low+high", (instance) =>
+        Effect.gen(function* () {
+          const replaced = yield* instance.snapshot.streamChanges.pipe(
+            Stream.filter((snapshot) => effortLevels(snapshot) === "default:high,other:xhigh"),
+            Stream.runHead,
+            Effect.forkScoped({ startImmediately: true }),
+          );
+          const models = ["default", "other"];
+          yield* coordinator.publishLiveConfiguration(
+            instanceId,
+            liveSession(models, "other", ["xhigh"]),
+          );
+          yield* coordinator.publishLiveConfiguration(
+            instanceId,
+            liveSession(models, "default", ["high"]),
+          );
+          yield* Fiber.join(replaced);
+          // The session ends with this instance; only the stored levels remain.
+          yield* coordinator.clearLiveConfiguration(instanceId);
+        }),
+      );
+      expect(yield* agent.modelSwitches).toEqual(["other", "default"]);
+
+      yield* runInstance("1.0.0", "default:medium+high,other:xhigh");
+      expect(yield* agent.modelSwitches).toEqual(["other", "default"]);
+
+      // An agent update makes every stored level stale.
+      yield* runInstance("2.0.0", "default:medium+high,other:low+high");
+      expect(yield* agent.modelSwitches).toEqual(["other", "default", "other", "default"]);
     }),
   );
 });
