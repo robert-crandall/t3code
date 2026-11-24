@@ -192,6 +192,10 @@ CONFIG_META="$(printf '%s' "$CONFIG_JSON" | node -e '
   }
   const haystack = `${raw}\n${decodedClerk}`.toLowerCase();
   const leaked = forbidden.filter((token) => haystack.includes(token.toLowerCase()));
+  const bundleId = typeof parsed?.ios?.bundleIdentifier === "string" ? parsed.ios.bundleIdentifier : "";
+  if (/^com\.t3tools\.t3code(?:\.|$)/i.test(bundleId)) {
+    leaked.push(`ios.bundleIdentifier (${bundleId})`);
+  }
   if (leaked.length > 0) {
     console.error(`[build-ios] Refusing build: resolved Expo config references upstream values: ${leaked.join(", ")}`);
     process.exit(1);
