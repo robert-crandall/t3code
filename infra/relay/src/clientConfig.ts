@@ -23,6 +23,13 @@ export class RelayUrlUnavailableError extends Schema.TaggedError<RelayUrlUnavail
 const relayClientConfigEnv = (config: { readonly url: string }) =>
   ({
     T3CODE_RELAY_URL: config.url,
+    // Clear previously managed Axiom tracing keys on checkouts upgrading from earlier deploys.
+    T3CODE_MOBILE_OTLP_TRACES_URL: undefined,
+    T3CODE_MOBILE_OTLP_TRACES_DATASET: undefined,
+    T3CODE_MOBILE_OTLP_TRACES_TOKEN: undefined,
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_URL: undefined,
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: undefined,
+    T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: undefined,
   }) as const;
 
 export class EnvValueNotSingleLineError extends Schema.TaggedError<EnvValueNotSingleLineError>()(
@@ -37,11 +44,13 @@ export class EnvValueNotSingleLineError extends Schema.TaggedError<EnvValueNotSi
 /** Remove every duplicate: parseEnv takes the last value, which could otherwise override the update. */
 export function reconcileEnvFile(
   contents: string,
-  entries: Readonly<Record<string, string>>,
+  entries: Readonly<Record<string, string | undefined>>,
 ): string {
   const lines = contents === "" ? [] : contents.replace(/\n$/u, "").split("\n");
   const assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/u;
-  const pending = new Map(Object.entries(entries));
+  const pending = new Map(
+    Object.entries(entries).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
   const out: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
@@ -89,7 +98,9 @@ export const PublishClientConfig = Alchemy.Action(
       const entries = relayClientConfigEnv({ ...input, url });
       // Reject line breaks in provider values to prevent injected assignments.
       for (const [name, value] of Object.entries(entries)) {
-        if (/[\r\n]/u.test(value)) return yield* new EnvValueNotSingleLineError({ key: name });
+        if (value !== undefined && /[\r\n]/u.test(value)) {
+          return yield* new EnvValueNotSingleLineError({ key: name });
+        }
       }
       const existing = (yield* fs.exists(target)) ? yield* fs.readFileString(target) : "";
       yield* fs.writeFileString(target, reconcileEnvFile(existing, entries));

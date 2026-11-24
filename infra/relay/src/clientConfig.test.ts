@@ -54,6 +54,16 @@ describe("reconcileEnvFile", () => {
   it("leaves a commented-out assignment alone", () => {
     expect(reconcileEnvFile("#A=old\n", { A: "new" })).toBe("#A=old\nA=new\n");
   });
+
+  it("removes keys mapped to undefined while keeping unrelated lines", () => {
+    expect(
+      reconcileEnvFile('KEEP=yes\nOLD_A=1\nOLD_B="multi\nline"\nOLD_A=2\n', {
+        OLD_A: undefined,
+        OLD_B: undefined,
+        NEW_KEY: "val",
+      }),
+    ).toBe("KEEP=yes\nNEW_KEY=val\n");
+  });
 });
 
 const { test } = Test.make({
@@ -72,7 +82,19 @@ describe("PublishClientConfig", () => {
       const path = yield* Path.Path;
       const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-relay-client-config-" });
       const target = path.join(dir, "client.env");
-      yield* fs.writeFileString(target, "KEEP=yes\n");
+      yield* fs.writeFileString(
+        target,
+        [
+          "KEEP=yes",
+          "T3CODE_MOBILE_OTLP_TRACES_URL=https://axiom.old/v1/traces",
+          "T3CODE_MOBILE_OTLP_TRACES_DATASET=old-mobile",
+          "T3CODE_MOBILE_OTLP_TRACES_TOKEN=old-mobile-token",
+          "T3CODE_RELAY_CLIENT_OTLP_TRACES_URL=https://axiom.old/v1/traces",
+          "T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET=old-client",
+          "T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN=old-client-token",
+          "",
+        ].join("\n"),
+      );
       const configured = Effect.provide(
         ConfigProvider.layer(
           ConfigProvider.fromUnknown({ T3CODE_RELAY_CLIENT_CONFIG_ENV: target }),
@@ -85,6 +107,7 @@ describe("PublishClientConfig", () => {
       const first = yield* fs.readFileString(target);
       expect(first).toContain("KEEP=yes\n");
       expect(first).toContain("T3CODE_RELAY_URL=https://relay-v1.example.com\n");
+      expect(first).not.toContain("OTLP_TRACES");
 
       yield* fs.writeFileString(target, `${first}MANUAL=1\n`);
       yield* stack

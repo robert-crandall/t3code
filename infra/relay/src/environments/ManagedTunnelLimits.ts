@@ -170,6 +170,10 @@ const make = Effect.gen(function* () {
           );
 
         const override = yield* loadOverride(input.userId);
+        // Self-hosted relays without T3 Chat plan tiers are uncapped unless an explicit per-user override exists.
+        if (!t3Chat.available && override === null) {
+          return yield* reserve;
+        }
         const baseMaxTunnels = override ?? DEFAULT_MANAGED_TUNNEL_LIMIT;
 
         const pendingCutoff = DateTime.formatIso(

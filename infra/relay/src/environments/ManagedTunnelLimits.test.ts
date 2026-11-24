@@ -422,4 +422,36 @@ describe("ManagedTunnelLimits", () => {
       expect(lookups).toEqual([]);
     }),
   );
+
+  it.effect("does not enforce the default cap when T3 Chat is unavailable unless overridden", () =>
+    Effect.gen(function* () {
+      const runWithDisabledT3Chat = (activeTunnels: number, override?: number) =>
+        Effect.gen(function* () {
+          const limits = yield* ManagedTunnelLimits.ManagedTunnelLimits;
+          return yield* limits.withCapacity(
+            { userId: "user-1", environmentId: "env-new" },
+            Effect.void,
+          );
+        }).pipe(
+          Effect.provide(
+            ManagedTunnelLimits.layer.pipe(
+              Layer.provide(
+                Layer.succeed(
+                  RelayDb.RelayDb,
+                  makeFakeDb({
+                    otherSlots: () => activeTunnels,
+                    ...(override === undefined ? {} : { override }),
+                  }),
+                ),
+              ),
+              Layer.provide(T3ChatAccounts.layer),
+            ),
+          ),
+        );
+
+      yield* runWithDisabledT3Chat(DEFAULT_MANAGED_TUNNEL_LIMIT + 5);
+      const error = yield* Effect.flip(runWithDisabledT3Chat(2, 2));
+      expect(error).toMatchObject({ _tag: "ManagedTunnelLimitExceeded", maxTunnels: 2 });
+    }),
+  );
 });
