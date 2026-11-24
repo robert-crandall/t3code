@@ -12,7 +12,7 @@ CONFIGURATION="Release"
 PERSONAL_CAPABILITIES="0"
 SKIP_PREBUILD="0"
 ALLOW_PROVISIONING_UPDATES="0"
-SIMULATOR_NAME="${T3CODE_IOS_SIMULATOR:-iPhone 17}"
+SIMULATOR_NAME=""
 ARCHIVE_PATH=""
 
 usage() {
@@ -86,6 +86,15 @@ if [[ -n "$ARCHIVE_PATH" ]]; then
   fi
 fi
 
+ALIAS_GROUPS_JSON='[
+  ["T3CODE_RELAY_URL","VITE_T3CODE_RELAY_URL"],
+  ["T3CODE_CLERK_PUBLISHABLE_KEY","VITE_CLERK_PUBLISHABLE_KEY","EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY"],
+  ["T3CODE_CLERK_JWT_TEMPLATE","VITE_CLERK_JWT_TEMPLATE","EXPO_PUBLIC_CLERK_JWT_TEMPLATE"],
+  ["T3CODE_MOBILE_OTLP_TRACES_URL","EXPO_PUBLIC_OTLP_TRACES_URL"],
+  ["T3CODE_MOBILE_OTLP_TRACES_DATASET","EXPO_PUBLIC_OTLP_TRACES_DATASET"],
+  ["T3CODE_MOBILE_OTLP_TRACES_TOKEN","EXPO_PUBLIC_OTLP_TRACES_TOKEN"]
+]'
+
 # Load optional local overrides without clobbering env vars already set by caller.
 if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
   ENV_OVERRIDES_FILE="$(mktemp)"
@@ -94,10 +103,15 @@ if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
     const fs = require("node:fs");
     const { parseEnv } = require("node:util");
     const parsed = parseEnv(fs.readFileSync(process.argv[1], "utf8"));
+    for (const group of JSON.parse(process.argv[2])) {
+      if (group.some((k) => Object.hasOwn(process.env, k))) {
+        for (const k of group) delete parsed[k];
+      }
+    }
     for (const [k, v] of Object.entries(parsed)) {
       if (typeof v === "string") process.stdout.write(`${k}\0${v}\0`);
     }
-  ' "$REPO_ROOT/.env.ios.local" > "$ENV_OVERRIDES_FILE"; then
+  ' "$REPO_ROOT/.env.ios.local" "$ALIAS_GROUPS_JSON" > "$ENV_OVERRIDES_FILE"; then
     echo "[build-ios] Unable to load .env.ios.local; refusing build." >&2
     exit 1
   fi
@@ -113,6 +127,8 @@ if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
   rm -f "$ENV_OVERRIDES_FILE"
   ENV_OVERRIDES_FILE=""
 fi
+
+SIMULATOR_NAME="${SIMULATOR_NAME:-${T3CODE_IOS_SIMULATOR:-iPhone 17}}"
 
 export APP_VARIANT="${APP_VARIANT:-production}"
 export T3CODE_MOBILE_IGNORE_REPO_ENV=1
@@ -199,9 +215,13 @@ CONFIG_META="$(printf '%s' "$CONFIG_JSON" | node -e '
   };
   const repoRoot = path.resolve(process.cwd(), "../..");
   hashDir("plugins", path.join(process.cwd(), "plugins"));
+  hashDir("mobile-assets", path.join(process.cwd(), "assets"));
+  hashDir("brand-assets", path.join(repoRoot, "assets"));
   hashFile("mobile-package.json", path.join(process.cwd(), "package.json"));
   hashFile("pnpm-lock.yaml", path.join(repoRoot, "pnpm-lock.yaml"));
   hashDir("patches", path.join(repoRoot, "patches"));
+  const marketingSiteUrl = process.env.EXPO_PUBLIC_MARKETING_SITE_URL;
+  hash.update("EXPO_PUBLIC_MARKETING_SITE_URL\0").update(marketingSiteUrl === undefined ? "unset" : `set:${marketingSiteUrl}`).update("\0");
   const fingerprint = hash.digest("hex");
   const relay = typeof parsed?.extra?.relay?.url === "string" ? parsed.extra.relay.url : "";
   const teamId = typeof parsed?.ios?.appleTeamId === "string" ? parsed.ios.appleTeamId : "";
@@ -234,15 +254,8 @@ else
   node -e '
     const fs = require("node:fs");
     const target = process.argv[1];
+    const aliasGroups = JSON.parse(process.argv[2]);
     const quote = (value) => `\x27${value.replace(/\x27/g, "\x27\\\x27\x27")}\x27`;
-    const aliasGroups = [
-      ["T3CODE_RELAY_URL", "VITE_T3CODE_RELAY_URL"],
-      ["T3CODE_CLERK_PUBLISHABLE_KEY", "VITE_CLERK_PUBLISHABLE_KEY", "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY"],
-      ["T3CODE_CLERK_JWT_TEMPLATE", "VITE_CLERK_JWT_TEMPLATE", "EXPO_PUBLIC_CLERK_JWT_TEMPLATE"],
-      ["T3CODE_MOBILE_OTLP_TRACES_URL", "EXPO_PUBLIC_OTLP_TRACES_URL"],
-      ["T3CODE_MOBILE_OTLP_TRACES_DATASET", "EXPO_PUBLIC_OTLP_TRACES_DATASET"],
-      ["T3CODE_MOBILE_OTLP_TRACES_TOKEN", "EXPO_PUBLIC_OTLP_TRACES_TOKEN"],
-    ];
     const directKeys = [
       "APP_VARIANT",
       "T3CODE_MOBILE_IGNORE_REPO_ENV",
@@ -289,7 +302,7 @@ else
       }
     }
     fs.appendFileSync(target, `${lines.join("\n")}\n`, "utf8");
-  ' "$MOBILE_DIR/ios/.xcode.env.local"
+  ' "$MOBILE_DIR/ios/.xcode.env.local" "$ALIAS_GROUPS_JSON"
   printf '%s\n' "$CONFIG_FINGERPRINT" > "$FINGERPRINT_FILE"
 fi
 
