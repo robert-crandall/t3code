@@ -1,11 +1,12 @@
 import * as Alchemy from "alchemy";
-import * as Axiom from "@alchemy.run/axiom";
 import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as Drizzle from "@alchemy.run/drizzle/Postgres";
 import * as Config from "effect/Config";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Aead from "effect/crypto/Aead";
 import * as Digest from "effect/crypto/Digest";
+import * as Kdf from "effect/crypto/Kdf";
 import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Signature from "effect/crypto/Signature";
@@ -29,9 +30,10 @@ import {
   withoutCapturedParentSpan,
 } from "./http/Api.ts";
 import * as CloudMintSigner from "./auth/CloudMintSigner.ts";
+import * as GitHubOAuth from "./auth/GitHubOAuth.ts";
+import * as OAuthSessions from "./auth/OAuthSessions.ts";
 import * as RelayHttpApi from "./http/Api.ts";
 import { ManagedEndpointZone, RelayApiZone, RelayDeploymentConfig } from "./zone.ts";
-import { RelayObservability } from "./observability.ts";
 import * as Observability from "./observability.ts";
 import * as DeliveryAttempts from "./agentActivity/DeliveryAttempts.ts";
 import * as AgentActivityRows from "./agentActivity/AgentActivityRows.ts";
@@ -74,10 +76,11 @@ import * as HookForwarder from "./hooks/HookForwarder.ts";
 import * as HeldHooks from "./hooks/HeldHooks.ts";
 import * as HookInbox from "./hooks/HookInbox.ts";
 import * as HookInboxObject from "./hooks/HookInboxObject.ts";
-import * as MobileTelemetry from "./mobileTelemetry/MobileTelemetry.ts";
 
 const layerWebcrypto = Layer.mergeAll(
+  Aead.layerWebCrypto,
   Digest.layerWebCrypto,
+  Kdf.layerWebCrypto,
   Mac.layerWebCrypto,
   Signature.layerWebCrypto,
 ).pipe(Layer.provideMerge(SecureRandom.layerWebCrypto));
@@ -121,17 +124,10 @@ export const layer = Api.make(
         date: "2026-05-22",
         flags: ["nodejs_compat"],
       },
-      // Requests run several Postgres queries in sequence. At the user's edge
-      // each one paid the round trip to the database (~300 ms from JNB); next
-      // to PlanetScale `us-west` the request pays that distance once.
-      placement: { region: "aws:us-west-2" },
       domain: relayPublicDomain,
-      // Workers Logs bills per GB, and every request, queue batch, and DO call is
-      // an invocation log. Axiom traces carry the full detail; keep a sample for
-      // crashes and limit errors that never export a span.
       observability: {
         enabled: true,
-        logs: { enabled: true, invocationLogs: true, headSamplingRate: 0.01 },
+        logs: { enabled: true, invocationLogs: false },
       },
     })),
     Effect.orDie,
@@ -146,7 +142,6 @@ export const layer = Api.make(
     const relayApiZone = yield* RelayApiZone;
     const managedEndpointZone = yield* ManagedEndpointZone;
     const randomApnsDeliveryJobSigningSecret = yield* ApnsDeliveryJobSigningSecret;
-    const observability = yield* RelayObservability;
 
     const apnsEnabled = yield* Config.Boolean("APNS_ENABLED").pipe(Config.withDefault(true));
     const apnsCredentials = apnsEnabled
@@ -168,18 +163,12 @@ export const layer = Api.make(
     const apnsDeliveryQueueSender = yield* Cloudflare.Queues.WriteQueue(apnsDeliveryQueue);
     const fcmDeliveryQueueSender = yield* Cloudflare.Queues.WriteQueue(fcmDeliveryQueue);
 
-    const clerkSecretKey = yield* Config.Redacted("CLERK_SECRET_KEY");
-    const clerkPublishableKey = yield* Config.String("CLERK_PUBLISHABLE_KEY");
-    const clerkJwtAudience = yield* Config.String("CLERK_JWT_AUDIENCE");
-    const t3ChatLinkSecret = Option.getOrUndefined(
-      Option.filter(
-        yield* Config.option(Config.Redacted("T3CHAT_LINK_SECRET")),
-        (value) => Redacted.value(value).trim().length > 0,
-      ),
-    );
-    const t3ChatBaseUrl = yield* Config.String("T3CHAT_URL").pipe(
-      Config.withDefault("https://t3.chat"),
-    );
+    const githubOAuthClientId = yield* Config.String("GITHUB_OAUTH_CLIENT_ID");
+    const githubOAuthClientSecret = yield* Config.Redacted("GITHUB_OAUTH_CLIENT_SECRET");
+    const githubAllowedOrgs = (yield* Config.String("GITHUB_OAUTH_ALLOWED_ORGS"))
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
 
     const cloudMintPrivateKey = yield* cloudMintKeyPair.privateKey;
     const cloudMintPublicKey = yield* cloudMintKeyPair.publicKey;
@@ -216,21 +205,6 @@ export const layer = Api.make(
       },
     });
     const hookInboxes = yield* HookInboxObject.HookInboxObject;
-    const mobileTelemetryRateLimit = yield* Cloudflare.RateLimit("MOBILE_TELEMETRY_RATE_LIMIT", {
-      namespaceId: 1003,
-      simple: {
-        limit: MobileTelemetry.MOBILE_TELEMETRY_RATE_LIMIT.limit,
-        period: MobileTelemetry.MOBILE_TELEMETRY_RATE_LIMIT.periodSeconds,
-      },
-    });
-    const mobileSourceMaps = yield* Cloudflare.R2.ReadBucket(observability.mobileSourceMaps);
-    const mobileTelemetryToken = yield* observability.mobileTelemetryIngestToken.token;
-    const mobileTracesUrl = yield* observability.traces.otelTracesEndpoint;
-    const mobileTracesDataset = yield* observability.traces.name;
-    const mobileLogsUrl = yield* observability.mobileLogs.otelLogsEndpoint;
-    const mobileLogsDataset = yield* observability.mobileLogs.name;
-    const mobileMetricsUrl = yield* observability.mobileMetrics.otelMetricsEndpoint;
-    const mobileMetricsDataset = yield* observability.mobileMetrics.name;
 
     const alchemyRuntimeContext: Alchemy.BaseRuntimeContext = yield* Cloudflare.Worker;
 
@@ -240,9 +214,11 @@ export const layer = Api.make(
         ...(fcmServiceAccount ? { fcmServiceAccount } : {}),
         apns: apnsCredentials,
         apnsDeliveryJobSigningSecret: yield* apnsDeliveryJobSigningSecret,
-        clerkSecretKey,
-        clerkPublishableKey,
-        clerkJwtAudience,
+        githubOAuth: {
+          clientId: githubOAuthClientId,
+          clientSecret: githubOAuthClientSecret,
+          allowedOrgs: githubAllowedOrgs,
+        },
         cloudMintPrivateKey: yield* cloudMintPrivateKey,
         cloudMintPublicKey: yield* cloudMintPublicKey,
         managedEndpointBaseDomain: yield* managedEndpointZoneName,
@@ -250,9 +226,6 @@ export const layer = Api.make(
         managedEndpointCleanupMode,
         legacyManagedEndpointCleanupMode,
         ...(legacyTunnelGraceMinutes === undefined ? {} : { legacyTunnelGraceMinutes }),
-        ...(t3ChatLinkSecret
-          ? { t3Chat: { baseUrl: t3ChatBaseUrl, linkSecret: t3ChatLinkSecret } }
-          : {}),
       });
     });
 
@@ -308,7 +281,7 @@ export const layer = Api.make(
           alchemyRuntimeContext,
         ),
       ),
-      Layer.provideMerge(DpopProofs.layer),
+      Layer.provideMerge(Layer.mergeAll(DpopProofs.layer, OAuthSessions.layer)),
       Layer.provideMerge(ApnsDeliveries.layer),
       Layer.provideMerge(
         FcmDeliveries.layer.pipe(
@@ -380,64 +353,12 @@ export const layer = Api.make(
       allowEndpoint: allowWith(hookEndpointRateLimit),
     });
 
-    // `fetch` rebuilds its layers per request; the source map cache must outlive one.
-    const mobileSourceMapLookups = yield* MobileTelemetry.SourceMaps.pipe(
-      Effect.provide(MobileTelemetry.layerSourceMaps),
-      Effect.provideService(MobileTelemetry.SourceMapObjects, {
-        get: (key) =>
-          mobileSourceMaps.get(key).pipe(
-            Effect.map((object) =>
-              object === null
-                ? undefined
-                : {
-                    size: object.size,
-                    text: object.text().pipe(
-                      Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-                      Effect.mapError(
-                        (cause) => new MobileTelemetry.SourceMapObjectError({ key, cause }),
-                      ),
-                    ),
-                  },
-            ),
-            Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-            Effect.mapError((cause) => new MobileTelemetry.SourceMapObjectError({ key, cause })),
-          ),
-      }),
-    );
-    const layerMobileTelemetry = MobileTelemetry.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.effect(
-            MobileTelemetry.MobileTelemetrySettings,
-            Effect.gen(function* () {
-              return MobileTelemetry.MobileTelemetrySettings.of({
-                axiomToken: yield* mobileTelemetryToken,
-                destinations: {
-                  traces: { url: yield* mobileTracesUrl, dataset: yield* mobileTracesDataset },
-                  logs: { url: yield* mobileLogsUrl, dataset: yield* mobileLogsDataset },
-                  metrics: { url: yield* mobileMetricsUrl, dataset: yield* mobileMetricsDataset },
-                },
-              });
-            }),
-          ),
-          Layer.succeed(MobileTelemetry.MobileTelemetryRateLimiter, {
-            allow: allowWith(
-              mobileTelemetryRateLimit,
-              "relay.mobile_telemetry.rate_limiter_failed_open",
-            ),
-          }),
-          Layer.succeed(MobileTelemetry.SourceMaps, mobileSourceMapLookups),
-        ),
-      ),
-    );
-
     const layerApp = Layer.mergeAll(
       layerRelayApi,
       HookForwarder.layerApi.pipe(
         Layer.provide(HookForwarder.layer),
         Layer.provide(layerHookRateLimiter),
       ),
-      MobileTelemetry.layerApi.pipe(Layer.provide(layerMobileTelemetry)),
     ).pipe(
       Layer.provideMerge(RelayHttpApi.layerClientAuth),
       Layer.provideMerge(RelayHttpApi.layerDpopClientAuth),
@@ -496,6 +417,9 @@ export const layer = Api.make(
                 Effect.flatMap((attempts) => attempts.pruneExpired),
               ),
             ),
+            Effect.andThen(
+              OAuthSessions.OAuthSessions.pipe(Effect.flatMap((sessions) => sessions.pruneExpired)),
+            ),
             Effect.catchCause((cause) =>
               Cause.hasInterrupts(cause)
                 ? Effect.interrupt
@@ -537,6 +461,7 @@ export const layer = Api.make(
         HttpApiBuilder.layer(RelayApi, { openapiPath: "/openapi.json" }).pipe(
           Layer.provide(layerApp),
         ),
+        GitHubOAuth.layerRoutes.pipe(Layer.provideMerge(layerRuntime)),
         HttpApiScalar.layer(RelayApi, { path: "/docs" }),
         RelayHttpApi.layerDocsRedirectRoute,
       ).pipe(
@@ -565,22 +490,10 @@ export const layer = Api.make(
         Layer.provideMerge(Cloudflare.Tunnel.ReadWriteTunnelBinding),
         Layer.provideMerge(Cloudflare.DNS.ReadWriteDnsHttp),
         Layer.provideMerge(Cloudflare.Workers.RateLimitBinding),
-        Layer.provideMerge(Cloudflare.R2.ReadBucketBinding),
         Layer.provideMerge(HookInboxObject.layer),
         // Disable the duplicate runtime span; ours applies route/header/token redaction and rejects sender traceparent.
         Layer.provideMerge(
           Alchemy.Telemetry.layer(Layer.succeed(HttpMiddleware.TracerDisabledWhen)(() => true)),
-        ),
-        Layer.provideMerge(
-          Layer.unwrap(
-            Effect.map(RelayObservability, (observability) =>
-              Axiom.Telemetry({
-                serviceName: "t3code-relay",
-                token: observability.workerIngestToken,
-                traces: observability.traces,
-              }),
-            ),
-          ),
         ),
       ),
     ),

@@ -54,15 +54,21 @@ export interface T3ChatSettings {
   readonly linkSecret: Redacted.Redacted<string>;
 }
 
+export interface GitHubOAuthSettings {
+  readonly clientId: string;
+  readonly clientSecret: Redacted.Redacted<string>;
+  readonly allowedOrgs: ReadonlyArray<string>;
+  readonly oauthBaseUrl?: string;
+  readonly apiBaseUrl?: string;
+}
+
 export class RelayConfiguration extends Context.Service<
   RelayConfiguration,
   {
     readonly relayIssuer: string;
     readonly apns: ApnsCredentials | null;
     readonly fcmServiceAccount?: Redacted.Redacted<string>;
-    readonly clerkSecretKey: Redacted.Redacted<string>;
-    readonly clerkPublishableKey: string;
-    readonly clerkJwtAudience: string;
+    readonly githubOAuth: GitHubOAuthSettings;
     readonly apnsDeliveryJobSigningSecret: Redacted.Redacted<string>;
     readonly cloudMintPrivateKey: Redacted.Redacted<string>;
     readonly cloudMintPublicKey: string;

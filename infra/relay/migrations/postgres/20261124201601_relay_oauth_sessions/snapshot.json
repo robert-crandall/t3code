@@ -1,0 +1,416 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "ecadbc8d-bd3f-41d9-b1be-760a3a067084",
+  "prevIds": ["4a3b409a-6315-41e4-bd97-a2659709bf35"],
+  "footprints": [
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "relay_oauth_sessions"],
+      "writes": [
+        "s|tbl|public.relay_oauth_sessions",
+        "n|tbl|public.relay_oauth_sessions",
+        "e|tbl|public.relay_oauth_sessions",
+        "n|rel|public.relay_oauth_sessions",
+        "n|type|public.relay_oauth_sessions",
+        "n|rel|public.relay_oauth_sessions_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "relay_oauth_sessions",
+        "idx_relay_oauth_sessions_current_token_hash"
+      ],
+      "writes": [
+        "s|idx|public.idx_relay_oauth_sessions_current_token_hash",
+        "n|idx|public.idx_relay_oauth_sessions_current_token_hash",
+        "e|idx|public.idx_relay_oauth_sessions_current_token_hash",
+        "n|rel|public.idx_relay_oauth_sessions_current_token_hash"
+      ],
+      "reads": [
+        "n|tbl|public.relay_oauth_sessions",
+        "n|sch|public",
+        "n|col|public.relay_oauth_sessions.current_token_hash"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "relay_oauth_sessions",
+        "idx_relay_oauth_sessions_auth_code_jti"
+      ],
+      "writes": [
+        "s|idx|public.idx_relay_oauth_sessions_auth_code_jti",
+        "n|idx|public.idx_relay_oauth_sessions_auth_code_jti",
+        "e|idx|public.idx_relay_oauth_sessions_auth_code_jti",
+        "n|rel|public.idx_relay_oauth_sessions_auth_code_jti"
+      ],
+      "reads": [
+        "n|tbl|public.relay_oauth_sessions",
+        "n|sch|public",
+        "n|col|public.relay_oauth_sessions.auth_code_jti"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "relay_oauth_sessions",
+        "idx_relay_oauth_sessions_expires_at"
+      ],
+      "writes": [
+        "s|idx|public.idx_relay_oauth_sessions_expires_at",
+        "n|idx|public.idx_relay_oauth_sessions_expires_at",
+        "e|idx|public.idx_relay_oauth_sessions_expires_at",
+        "n|rel|public.idx_relay_oauth_sessions_expires_at"
+      ],
+      "reads": [
+        "n|tbl|public.relay_oauth_sessions",
+        "n|sch|public",
+        "n|col|public.relay_oauth_sessions.expires_at"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "relay_oauth_sessions",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "id",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "current_token_hash",
+        "type": "varchar(128)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "auth_code_jti",
+        "type": "varchar(128)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "auth_code_expires_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "user_id",
+        "type": "varchar(191)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "github_login",
+        "type": "varchar(191)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "email",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "encrypted_github_access_token",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "client_id",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "rotated_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "revoked_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "expires_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "absolute_expires_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "created_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "updated_at",
+        "type": "varchar(64)",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "idx_relay_oauth_sessions_current_token_hash",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "current_token_hash",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": true,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "idx_relay_oauth_sessions_auth_code_jti",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "auth_code_jti",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": true,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "idx_relay_oauth_sessions_expires_at",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "expires_at",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "relay_oauth_sessions_pkey",
+        "columns": ["id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    }
+  ]
+}

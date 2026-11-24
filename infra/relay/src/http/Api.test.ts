@@ -5,15 +5,18 @@ import {
   type RelayClientDeviceRecord,
 } from "@t3tools/contracts/relay";
 import * as EnvironmentLinker from "../environments/EnvironmentLinker.ts";
+import * as CloudMintSigner from "../auth/CloudMintSigner.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
 import * as Devices from "../agentActivity/Devices.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no generateKeyPairSync.
 import * as NodeCrypto from "node:crypto";
-import { createClerkClient, verifyToken } from "@clerk/backend";
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
+import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
+import * as Signature from "effect/crypto/Signature";
+import * as TestClock from "effect/testing/TestClock";
 import * as Context from "effect/Context";
 import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import * as DateTime from "effect/DateTime";
@@ -48,9 +51,9 @@ import {
   recoverEnvironmentTunnelRecord,
   registerEnvironmentTunnelRecovery,
   relayDpopFailureReason,
+  stripUrlQuery,
   traceRelayHttpRequestWith,
   unlinkEnvironmentRecord,
-  verifyRelayClientBearerToken,
   verifyEnvironmentTunnelRecoveryProof,
   withoutCapturedParentSpan,
 } from "./Api.ts";
@@ -68,11 +71,6 @@ import * as AgentActivityPublisher from "../agentActivity/AgentActivityPublisher
 import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublishSignatures.ts";
 import * as T3ChatAccounts from "../t3chat/T3ChatAccounts.ts";
 
-vi.mock("@clerk/backend", () => ({
-  createClerkClient: vi.fn(),
-  verifyToken: vi.fn(),
-}));
-
 const relaySettings: RelayConfiguration.RelayConfiguration["Service"] = {
   relayIssuer: "https://relay.example.test",
   apns: {
@@ -82,9 +80,11 @@ const relaySettings: RelayConfiguration.RelayConfiguration["Service"] = {
     bundleId: "com.example.t3",
     environment: "sandbox",
   },
-  clerkSecretKey: Redacted.make("clerk-secret-key"),
-  clerkPublishableKey: "pk_test_test",
-  clerkJwtAudience: "t3-code-relay",
+  githubOAuth: {
+    clientId: "github-client-id",
+    clientSecret: Redacted.make("github-client-secret"),
+    allowedOrgs: ["robert-crandall-org"],
+  },
   apnsDeliveryJobSigningSecret: Redacted.make("apns-delivery-secret"),
   cloudMintPrivateKey: Redacted.make("cloud-mint-private-key"),
   cloudMintPublicKey: "cloud-mint-public-key",
@@ -385,59 +385,151 @@ describe("Cloudflare rate-limit retry hint", () => {
   );
 });
 
-describe("relay client authentication", () => {
-  it.effect("preserves the existing Clerk session JWT path", () =>
-    Effect.gen(function* () {
-      vi.mocked(verifyToken).mockResolvedValue({
-        sub: "user_session",
-        aud: relaySettings.clerkJwtAudience,
-      } as never);
+function makeRelayAuthTestLayer() {
+  const pair = NodeCrypto.generateKeyPairSync("ed25519");
+  const settings: RelayConfiguration.RelayConfiguration["Service"] = {
+    ...relaySettings,
+    cloudMintPrivateKey: Redacted.make(
+      pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    ),
+    cloudMintPublicKey: pair.publicKey.export({ type: "spki", format: "pem" }).toString(),
+  };
+  const layerTokens = RelayTokens.layer.pipe(
+    Layer.provideMerge(CloudMintSigner.layer),
+    Layer.provideMerge(RelayConfiguration.layer(settings)),
+    Layer.provide(Signature.layerWebCrypto),
+    Layer.provide(NodeCryptoLayer.layer),
+  );
+  return RelayHttpApi.layerClientAuth.pipe(Layer.provideMerge(layerTokens));
+}
 
-      expect(yield* verifyRelayClientBearerToken(relaySettings, "session-token")).toEqual({
-        sub: "user_session",
-        mode: "clerk_session_bearer",
+describe("relay client authentication", () => {
+  it.effect("accepts relay-signed client access tokens and exposes RelayClientPrincipal", () =>
+    Effect.gen(function* () {
+      const tokens = yield* RelayTokens.RelayTokens;
+      const auth = yield* RelayClientAuth;
+      const accessToken = yield* tokens.issueClientAccessToken({
+        userId: "github:42",
+        githubLogin: "octocat",
+        clientId: "t3-cli",
+        jti: "jti-1",
+        issuedAtEpochSeconds: 0,
+        expiresAtEpochSeconds: 900,
       });
-      expect(verifyToken).toHaveBeenCalledWith("session-token", {
-        secretKey: "clerk-secret-key",
-        audience: relaySettings.clerkJwtAudience,
-      });
-      expect(createClerkClient).not.toHaveBeenCalled();
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          vi.mocked(verifyToken).mockReset();
-          vi.mocked(createClerkClient).mockReset();
+
+      const response = yield* auth.clientBearer(
+        Effect.gen(function* () {
+          const principal = yield* RelayClientPrincipal;
+          return HttpServerResponse.jsonUnsafe({ userId: principal.userId });
         }),
+        {
+          credential: Redacted.make(accessToken),
+          endpoint: {} as never,
+          group: {} as never,
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(
+        JSON.parse(new TextDecoder().decode((response.body as { body: Uint8Array }).body)),
+      ).toEqual({
+        userId: "github:42",
+      });
+    }).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromWeb(new Request("https://relay.example.test/v1/environments")),
       ),
+      Effect.provideService(HttpServerRequest.ParsedSearchParams, {}),
+      Effect.provideService(HttpRouter.RouteContext, {
+        params: {},
+        route: {} as never,
+      }),
+      Effect.provide(makeRelayAuthTestLayer()),
+      Effect.scoped,
     ),
   );
 
-  it.effect("falls back to Clerk OAuth token verification for the headless CLI", () =>
+  it.effect("rejects ID tokens and tampered bearer tokens", () =>
     Effect.gen(function* () {
-      vi.mocked(verifyToken).mockRejectedValue(new Error("not a session JWT"));
-      vi.mocked(createClerkClient).mockReturnValue({
-        authenticateRequest: vi.fn().mockResolvedValue({
-          isAuthenticated: true,
-          toAuth: () => ({ userId: "user_oauth" }),
-        }),
-      } as never);
+      const tokens = yield* RelayTokens.RelayTokens;
+      const auth = yield* RelayClientAuth;
+      const idToken = yield* tokens.issueClientIdToken({
+        userId: "github:42",
+        githubLogin: "octocat",
+        email: "octocat@example.com",
+        clientId: "t3-cli",
+        issuedAtEpochSeconds: 0,
+        expiresAtEpochSeconds: 900,
+      });
 
-      expect(yield* verifyRelayClientBearerToken(relaySettings, "oauth-token")).toEqual({
-        sub: "user_oauth",
-        mode: "clerk_oauth_bearer",
-      });
-      expect(createClerkClient).toHaveBeenCalledWith({
-        secretKey: "clerk-secret-key",
-        publishableKey: "pk_test_test",
-      });
+      for (const badToken of [idToken, "not-a-jwt"]) {
+        const error = yield* Effect.flip(
+          auth.clientBearer(Effect.succeed(HttpServerResponse.empty()), {
+            credential: Redacted.make(badToken),
+            endpoint: {} as never,
+            group: {} as never,
+          }),
+        );
+        expect(Predicate.isTagged(error, "RelayAuthInvalidError")).toBe(true);
+        if (Predicate.isTagged(error, "RelayAuthInvalidError")) {
+          expect(error.reason).toBe("invalid_bearer");
+        }
+      }
     }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          vi.mocked(verifyToken).mockReset();
-          vi.mocked(createClerkClient).mockReset();
-        }),
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromWeb(new Request("https://relay.example.test/v1/environments")),
       ),
+      Effect.provideService(HttpServerRequest.ParsedSearchParams, {}),
+      Effect.provideService(HttpRouter.RouteContext, {
+        params: {},
+        route: {} as never,
+      }),
+      Effect.provide(makeRelayAuthTestLayer()),
+      Effect.scoped,
     ),
+  );
+
+  it.effect("strips OAuth query params from deadline logs while passing full URL to routes", () =>
+    Effect.gen(function* () {
+      let routeObservedUrl = "";
+      const logged: Array<string> = [];
+      const captureLogger = Logger.make(({ message }) => {
+        logged.push(JSON.stringify(message));
+      });
+
+      expect(
+        stripUrlQuery(
+          "https://relay.example.test/v1/auth/github/callback?code=top-secret&state=s1",
+        ),
+      ).toBe("https://relay.example.test/v1/auth/github/callback");
+
+      const request = HttpServerRequest.fromWeb(
+        new Request("https://relay.example.test/v1/auth/github/callback?code=top-secret&state=s1"),
+      );
+      const fiber = yield* Effect.forkChild(
+        traceRelayHttpRequestWith(
+          Effect.gen(function* () {
+            const req = yield* HttpServerRequest.HttpServerRequest;
+            routeObservedUrl = req.url;
+            return yield* Effect.never;
+          }),
+          Layer.empty,
+        ).pipe(
+          Effect.provideService(HttpServerRequest.HttpServerRequest, request),
+          Effect.provide(Logger.layer([captureLogger])),
+        ),
+      );
+
+      yield* TestClock.adjust("10 seconds");
+      const response = yield* Fiber.join(fiber);
+
+      expect(response.status).toBe(504);
+      expect(routeObservedUrl).toContain("code=top-secret");
+      expect(logged.join("\n")).toContain("/v1/auth/github/callback");
+      expect(logged.join("\n")).not.toContain("top-secret");
+      expect(logged.join("\n")).not.toContain("state=s1");
+    }).pipe(Effect.scoped),
   );
 });
 

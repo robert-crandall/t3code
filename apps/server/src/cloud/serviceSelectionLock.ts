@@ -12,10 +12,30 @@ const bootEpochSeconds = () => Math.round(Date.now() / 1000 - NodeOS.uptime());
 /** Serialize durable selection and unit writes, never manager stop/start commands. */
 export async function acquireServiceSelectionLock(
   selectionPath: string,
-  options?: { readonly waitForRetry?: () => Promise<void> },
+  options?: {
+    readonly waitForRetry?: () => Promise<void>;
+    readonly signal?: AbortSignal;
+  },
 ): Promise<() => void> {
+  const signal = options?.signal;
   const waitForRetry =
-    options?.waitForRetry ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+    options?.waitForRetry ??
+    (() =>
+      new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, 50);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      }));
   const directory = NodePath.dirname(selectionPath);
   NodeFS.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const lock = selectionPath + ".selection-lock";
@@ -40,6 +60,9 @@ export async function acquireServiceSelectionLock(
   try {
     NodeFS.writeFileSync(NodePath.join(candidate, owner), "", { mode: 0o600 });
     while (true) {
+      if (signal?.aborted) {
+        throw new Error(`Lock acquisition aborted for ${lock}.`);
+      }
       try {
         // Publish the owner atomically; rename cannot replace another populated directory.
         NodeFS.renameSync(candidate, lock);

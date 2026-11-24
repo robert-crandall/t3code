@@ -83,21 +83,43 @@ in this directory):
 vp run --filter t3code-relay deploy
 ```
 
-The stack provisions the Cloudflare Worker and queues, managed endpoint resources, database
-connectivity, and relay tracing resources. Copy [`infra/relay/.env.example`](./.env.example) to
-`infra/relay/.env` and fill in the deployment-specific values before deploying. Alchemy loads that
-file from the relay directory. Runtime secrets include Clerk, APNs, and optional FCM credentials. Set
-`APNS_ENABLED=false` for an Android-only development deployment without Apple credentials. Production adopts
-the configured API and tunnel DNS zones as retained Cloudflare resources. Personal stages reference
-the production-owned zones.
+The stack provisions the Cloudflare Worker, Durable Objects, managed endpoint resources, and binds
+an existing Cloudflare Hyperdrive configuration by lookup (`RELAY_HYPERDRIVE_ID`, or
+`RELAY_HYPERDRIVE_NAME` defaulting to `t3code-relay` on `prod` and `t3code-relay-<stage>` on
+non-prod stages). Create the Hyperdrive config with `--caching-disabled true` so transactional
+`SELECT ... FOR UPDATE` and read-after-write queries never hit cached results. Axiom, R2,
+PlanetScale, and Clerk are not required.
 
-The `prod` Alchemy stage owns the retained PlanetScale database and is the shared hosted relay for
-stable and nightly clients. Every other stage references that database and provisions an isolated
-PlanetScale branch and runtime role for local development, so deploy `prod` before creating
-developer stages:
+This stack targets a fresh Alchemy stage. Because the legacy Axiom, PlanetScale, and Drizzle
+Alchemy providers were removed, deploying directly over an existing upstream stage that still holds
+those resources in Alchemy state will fail during planning with `MissingProviderError`. If migrating
+an existing upstream stage rather than deploying to a new Cloudflare account or stage, destroy or
+remove those legacy resources from Alchemy state before deploying this revision (back up or retain
+your production database first).
+
+Copy [`infra/relay/.env.example`](./.env.example) to `infra/relay/.env` and fill in the
+deployment-specific values before deploying:
+
+1. Run database migrations against your PostgreSQL database:
+
+```sh
+DATABASE_URL="postgresql://..." pnpm --dir infra/relay db:migrate
+```
+
+2. Deploy the `prod` stage with Alchemy (loads `infra/relay/.env`):
 
 ```sh
 vp run --filter t3code-relay deploy -- --stage prod
+```
+
+Runtime secrets include `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`,
+`GITHUB_OAUTH_ALLOWED_ORGS`, and optional APNs/FCM credentials (set `APNS_ENABLED=false` to disable
+Apple push notifications). If the allowed GitHub organization enables OAuth App access restrictions,
+own the OAuth App under that organization or approve it in org settings so org membership checks
+succeed. Production adopts the configured API and tunnel DNS zones as retained Cloudflare resources;
+personal stages reference the production-owned zones.
+
+```sh
 vp run --filter t3code-relay deploy -- --env-file .env.local
 ```
 
@@ -111,67 +133,17 @@ DNS-safe sanitization as Alchemy physical resource names, so `prod` uses
 domain override.
 
 The stack's `PublishClientConfig` action ([`src/clientConfig.ts`](./src/clientConfig.ts)) writes the
-deployed relay URL and tracing configuration into the repository-root `.env`, so subsequent source
-builds point at the relay that was just deployed without copying values manually. It runs only when
-one of those outputs changed, and `T3CODE_RELAY_CLIENT_CONFIG_ENV` redirects it to another file.
+deployed relay URL into the repository-root `.env`, so subsequent source builds point at the relay
+that was just deployed without copying values manually. It runs only when that output changed, and
+`T3CODE_RELAY_CLIENT_CONFIG_ENV` redirects it to another file.
 
 ### Deployment CI
 
-The relay is versioned separately from client releases. `.github/workflows/deploy-relay.yml` deploys
-the shared Alchemy `prod` stage on every push to `main`. Stable and nightly release builds both
-resolve their static public config from the same
-`production` GitHub environment. Labeling a same-repository PR `relay:preview` deploys a `pr-<number>`
-stage, and the cleanup workflow tears it down; see
-[`relay-preview.yml`](../../.github/workflows/relay-preview.yml). Developers can
-deploy personal non-production stages locally with any stage name other than `prod`.
-
-The repository must define these Actions variables shared by relay deployments:
-
-- `CLOUDFLARE_ACCOUNT_ID`
-- `PLANETSCALE_ORGANIZATION`
-- `AXIOM_ORG_ID`
-
-The repository must define these Actions secrets shared by relay deployments:
-
-- `CLOUDFLARE_API_TOKEN`
-- `PLANETSCALE_API_TOKEN_ID`
-- `PLANETSCALE_API_TOKEN`
-- `AXIOM_TOKEN`
-
-The `production` GitHub environment must define these Actions variables:
-
-- `RELAY_API_ZONE_NAME`
-- `RELAY_TUNNEL_ZONE_NAME`
-- `RELAY_DOMAIN` if overriding the derived production relay domain
-- `RELAY_ALERT_NOTIFIER_ID`, the Axiom notifier that relay alerts page. Without it the deployment
-  creates no monitors or health dashboard. See
-  [Relay alerts](../../docs/operations/05_relay-observability.md#alerts).
-- `RELAY_WARNING_NOTIFIER_ID`, optional, the Axiom notifier for relay warnings
-- `CLERK_PUBLISHABLE_KEY`
-- `CLERK_JWT_AUDIENCE`
-- `CLERK_JWT_TEMPLATE`
-- `APNS_ENVIRONMENT`
-- `APNS_TEAM_ID`
-- `APNS_KEY_ID`
-- `APNS_BUNDLE_ID`
-
-The `production` GitHub environment must define these Actions secrets:
-
-- `CLERK_SECRET_KEY`
-- `APNS_PRIVATE_KEY`
-- `FCM_SERVICE_ACCOUNT` when Android push is enabled
-- `T3CHAT_LINK_SECRET`, optional, shared with T3 Chat's `T3CODE_LINK_SECRET`. Without it the
-  T3 Chat account link is off. Local and preview stages can set `T3CHAT_URL` to point
-  at another T3 Chat deployment; production uses `https://t3.chat`.
-
-The account-scoped repository credentials are consumed by Alchemy while provisioning relay stages; they
-are not bound into the relay Worker. The production deployment uses an Axiom personal access token,
-so `AXIOM_ORG_ID` must accompany `AXIOM_TOKEN`. The release workflow reads the production relay's
-derived public URL and Clerk publishable key from the same environment for downstream desktop, CLI,
-and hosted web builds.
+The relay is versioned separately from client releases. Automated GitHub Actions deployment
+workflows (`deploy-relay.yml`, `relay-preview.yml`, and `release.yml`) are pending cutover from the
+upstream PlanetScale/Axiom/Clerk configuration to the self-hosted Hyperdrive + GitHub OAuth stack;
+deploy manually from `infra/relay` using the steps above until that cutover lands.
 
 See:
 
-- [T3 Connect setup](../../docs/operations/02_connect-setup.md) for Clerk keys, JWT templates, and sign-up restrictions.
-- [Relay Observability](../../docs/operations/05_relay-observability.md) for deployment tracing and diagnostics.
 - [T3 Connect architecture](../../docs/internals/06_t3-connect.md) for environment linking and trust boundaries.
