@@ -83,21 +83,31 @@ in this directory):
 vp run --filter t3code-relay deploy
 ```
 
-The stack provisions the Cloudflare Worker and queues, managed endpoint resources, database
-connectivity, and relay tracing resources. Copy [`infra/relay/.env.example`](./.env.example) to
-`infra/relay/.env` and fill in the deployment-specific values before deploying. Alchemy loads that
-file from the relay directory. Runtime secrets include Clerk, APNs, and optional FCM credentials. Set
-`APNS_ENABLED=false` for an Android-only development deployment without Apple credentials. Production adopts
-the configured API and tunnel DNS zones as retained Cloudflare resources. Personal stages reference
-the production-owned zones.
+The stack provisions the Cloudflare Worker, Durable Objects, managed endpoint resources, and binds
+an existing Cloudflare Hyperdrive configuration by lookup (`HYPERDRIVE_CONFIG_NAME`, defaulting to
+`t3code-relay`). Axiom, R2, PlanetScale, and Clerk are not required.
 
-The `prod` Alchemy stage owns the retained PlanetScale database and is the shared hosted relay for
-stable and nightly clients. Every other stage references that database and provisions an isolated
-PlanetScale branch and runtime role for local development, so deploy `prod` before creating
-developer stages:
+Copy [`infra/relay/.env.example`](./.env.example) to `infra/relay/.env` and fill in the
+deployment-specific values before deploying:
+
+1. Run database migrations against your PostgreSQL database:
+
+```sh
+DATABASE_URL="postgresql://..." pnpm --dir infra/relay db:migrate
+```
+
+2. Deploy the `prod` stage with Alchemy (loads `infra/relay/.env`):
 
 ```sh
 vp run --filter t3code-relay deploy -- --stage prod
+```
+
+Runtime secrets include `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`,
+`GITHUB_OAUTH_ALLOWED_ORGS`, and optional APNs/FCM credentials (set `APNS_ENABLED=false` to disable
+Apple push notifications). Production adopts the configured API and tunnel DNS zones as retained
+Cloudflare resources; personal stages reference the production-owned zones.
+
+```sh
 vp run --filter t3code-relay deploy -- --env-file .env.local
 ```
 

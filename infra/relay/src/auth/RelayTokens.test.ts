@@ -29,9 +29,11 @@ const config = RelayConfiguration.RelayConfiguration.of({
     bundleId: "com.t3tools.t3code.dev",
   },
   apnsDeliveryJobSigningSecret: Redacted.make("job-secret"),
-  clerkSecretKey: Redacted.make("clerk-secret"),
-  clerkPublishableKey: "pk_test_test",
-  clerkJwtAudience: "t3-code-relay",
+  githubOAuth: {
+    clientId: "github-client-id",
+    clientSecret: Redacted.make("github-client-secret"),
+    allowedOrgs: ["robert-crandall-org"],
+  },
   cloudMintPrivateKey: Redacted.make(keyPair.privateKey),
   cloudMintPublicKey: keyPair.publicKey,
   managedEndpointBaseDomain: undefined,
@@ -179,6 +181,86 @@ describe("RelayTokens", () => {
 
       yield* TestClock.setTime(150_000);
       expect(yield* relayTokens.verifyDpopAccessToken({ token })).toBeNull();
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("issues and verifies client access tokens and enforces strict JWT typ isolation", () =>
+    Effect.gen(function* () {
+      const relayTokens = yield* RelayTokens.RelayTokens;
+      const accessToken = yield* relayTokens.issueClientAccessToken({
+        userId: "github:42",
+        githubLogin: "octocat",
+        clientId: "t3-cli",
+        jti: "client-access-1",
+        issuedAtEpochSeconds: 100,
+        expiresAtEpochSeconds: 1_000,
+      });
+      const idToken = yield* relayTokens.issueClientIdToken({
+        userId: "github:42",
+        githubLogin: "octocat",
+        email: "octocat@example.com",
+        clientId: "t3-cli",
+        issuedAtEpochSeconds: 100,
+        expiresAtEpochSeconds: 1_000,
+      });
+      const stateToken = yield* relayTokens.issueOAuthStateToken({
+        clientId: "t3-cli",
+        redirectUri: "http://127.0.0.1:4321/callback",
+        clientState: "client-state-1",
+        codeChallenge: "challenge-1",
+        nonce: "nonce-1",
+        issuedAtEpochSeconds: 100,
+        expiresAtEpochSeconds: 700,
+      });
+      const codeToken = yield* relayTokens.issueOAuthCodeToken({
+        userId: "github:42",
+        githubLogin: "octocat",
+        email: "octocat@example.com",
+        clientId: "t3-cli",
+        redirectUri: "http://127.0.0.1:4321/callback",
+        codeChallenge: "challenge-1",
+        jti: "code-jti-1",
+        issuedAtEpochSeconds: 100,
+        expiresAtEpochSeconds: 160,
+      });
+      const deviceToken = yield* relayTokens.issueOAuthDeviceToken({
+        clientId: "t3-cli",
+        githubDeviceCode: "gh-device-1",
+        issuedAtEpochSeconds: 100,
+        expiresAtEpochSeconds: 700,
+      });
+
+      yield* TestClock.setTime(150_000);
+
+      expect(yield* relayTokens.verifyClientAccessToken({ token: accessToken })).toMatchObject({
+        sub: "github:42",
+        preferred_username: "octocat",
+        client_id: "t3-cli",
+        jti: "client-access-1",
+      });
+      expect(yield* relayTokens.verifyOAuthStateToken({ token: stateToken })).toMatchObject({
+        nonce: "nonce-1",
+        client_state: "client-state-1",
+      });
+      expect(yield* relayTokens.verifyOAuthCodeToken({ token: codeToken })).toMatchObject({
+        sub: "github:42",
+        jti: "code-jti-1",
+      });
+      expect(yield* relayTokens.verifyOAuthDeviceToken({ token: deviceToken })).toMatchObject({
+        github_device_code: "gh-device-1",
+      });
+
+      // Cross-purpose tokens must never pass another verifier.
+      for (const wrongToken of [idToken, stateToken, codeToken, deviceToken]) {
+        expect(yield* relayTokens.verifyClientAccessToken({ token: wrongToken })).toBeNull();
+      }
+      expect(yield* relayTokens.verifyOAuthCodeToken({ token: accessToken })).toBeNull();
+      expect(yield* relayTokens.verifyOAuthStateToken({ token: codeToken })).toBeNull();
+      expect(yield* relayTokens.verifyOAuthDeviceToken({ token: stateToken })).toBeNull();
+
+      // Expired access token is rejected.
+      yield* TestClock.setTime(1_061_000);
+      expect(yield* relayTokens.verifyClientAccessToken({ token: accessToken })).toBeNull();
     }).pipe(Effect.provide(layer)),
   );
 });
