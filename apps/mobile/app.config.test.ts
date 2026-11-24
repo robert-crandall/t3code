@@ -1,4 +1,6 @@
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+import type { ExportedConfig } from "expo/config-plugins";
+import { withPlugins } from "expo/config-plugins";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 
 import appleAppSiteAssociation from "../web/public/.well-known/apple-app-site-association.json";
@@ -167,24 +169,62 @@ it("preserves upstream defaults for upstream personal-team builds while omitting
   expect(config.extra?.eas?.projectId).toBe("d763fcb8-d37c-41ea-a773-b54a0ab4a454");
 });
 
-it("places withoutIosPersonalTeamCapabilities before expo-notifications and omits associatedDomains", async () => {
+it("strips aps-environment and omits associatedDomains for personal-capability builds", async () => {
+  async function evaluateEntitlements(
+    config: Awaited<ReturnType<typeof loadConfig>>,
+    initialEntitlements: Record<string, string | string[]>,
+  ) {
+    const entitlementPlugins = (config.plugins ?? []).filter(
+      (entry): entry is string | [string, Record<string, unknown>] =>
+        entry === "./plugins/withoutIosPersonalTeamCapabilities.cjs" ||
+        (Array.isArray(entry) && entry[0] === "expo-notifications"),
+    );
+    const modded = withPlugins(
+      { ...config, _internal: { projectRoot: import.meta.dirname } } as Parameters<
+        typeof withPlugins
+      >[0],
+      entitlementPlugins,
+    ) as ExportedConfig;
+    const entitlementsMod = modded.mods?.ios?.entitlements;
+    expect(entitlementsMod).toBeTypeOf("function");
+
+    const result = await entitlementsMod!({
+      ...modded,
+      modRequest: {
+        projectRoot: import.meta.dirname,
+        platformProjectRoot: `${import.meta.dirname}/ios`,
+        modName: "entitlements",
+        platform: "ios",
+        introspect: false,
+      },
+      modResults: initialEntitlements,
+      modRawConfig: config,
+    });
+    return result.modResults;
+  }
+
   const config = await loadConfig("production", {
     T3CODE_IOS_PERSONAL_TEAM: "1",
     T3CODE_IOS_BUNDLE_ID: "cloud.crandalls.t3code",
     T3CODE_IOS_TEAM_ID: "7492ZAHAJV",
     T3CODE_IOS_RELYING_PARTY: "clerk.crandalls.cloud",
   });
-
   expect(config.ios?.associatedDomains).toBeUndefined();
-  const plugins = config.plugins ?? [];
-  const stripIndex = plugins.findIndex(
-    (entry) => entry === "./plugins/withoutIosPersonalTeamCapabilities.cjs",
-  );
-  const notificationsIndex = plugins.findIndex(
-    (entry) => Array.isArray(entry) && entry[0] === "expo-notifications",
-  );
-  expect(stripIndex).toBeGreaterThanOrEqual(0);
-  expect(notificationsIndex).toBeGreaterThan(stripIndex);
+
+  const personalEntitlements = await evaluateEntitlements(config, {
+    "com.apple.security.application-groups": ["group.cloud.crandalls.t3code"],
+    "com.apple.developer.applesignin": ["Default"],
+  });
+  expect(personalEntitlements["aps-environment"]).toBeUndefined();
+  expect(personalEntitlements["com.apple.security.application-groups"]).toBeUndefined();
+  expect(personalEntitlements["com.apple.developer.applesignin"]).toBeUndefined();
+
+  const paidConfig = await loadConfig("production", {
+    T3CODE_IOS_BUNDLE_ID: "cloud.crandalls.t3code",
+    T3CODE_IOS_TEAM_ID: "7492ZAHAJV",
+  });
+  const paidEntitlements = await evaluateEntitlements(paidConfig, {});
+  expect(paidEntitlements["aps-environment"]).toBe("production");
 });
 
 it("treats whitespace-only custom override env vars as unset", async () => {
@@ -217,6 +257,9 @@ it("rejects invalid custom iOS bundle IDs, team IDs, schemes, relying parties, a
     loadConfig("production", { T3CODE_IOS_RELYING_PARTY: "https://clerk.example.com" }),
   ).rejects.toThrow("T3CODE_IOS_RELYING_PARTY");
   await expect(loadConfig("production", { T3CODE_IOS_BUILD_NUMBER: "1.0-beta" })).rejects.toThrow(
+    "T3CODE_IOS_BUILD_NUMBER",
+  );
+  await expect(loadConfig("production", { T3CODE_IOS_BUILD_NUMBER: "1.2.3.4" })).rejects.toThrow(
     "T3CODE_IOS_BUILD_NUMBER",
   );
 });

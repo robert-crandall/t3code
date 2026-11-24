@@ -88,6 +88,19 @@ fi
 
 # Load optional local overrides without clobbering env vars already set by caller.
 if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
+  ENV_OVERRIDES_FILE="$(mktemp)"
+  trap 'rm -f "${ENV_OVERRIDES_FILE:-}"' EXIT
+  if ! node -e '
+    const fs = require("node:fs");
+    const { parseEnv } = require("node:util");
+    const parsed = parseEnv(fs.readFileSync(process.argv[1], "utf8"));
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === "string") process.stdout.write(`${k}\0${v}\0`);
+    }
+  ' "$REPO_ROOT/.env.ios.local" > "$ENV_OVERRIDES_FILE"; then
+    echo "[build-ios] Unable to load .env.ios.local; refusing build." >&2
+    exit 1
+  fi
   while IFS= read -r -d '' key && IFS= read -r -d '' val; do
     if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
       echo "[build-ios] Ignoring invalid key in .env.ios.local: $key" >&2
@@ -96,18 +109,14 @@ if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
     if [[ -z "${!key+x}" ]]; then
       export "$key=$val"
     fi
-  done < <(node -e '
-    const fs = require("node:fs");
-    const { parseEnv } = require("node:util");
-    const parsed = parseEnv(fs.readFileSync(process.argv[1], "utf8"));
-    for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === "string") process.stdout.write(`${k}\0${v}\0`);
-    }
-  ' "$REPO_ROOT/.env.ios.local")
+  done < "$ENV_OVERRIDES_FILE"
+  rm -f "$ENV_OVERRIDES_FILE"
+  ENV_OVERRIDES_FILE=""
 fi
 
 export APP_VARIANT="${APP_VARIANT:-production}"
 export T3CODE_MOBILE_IGNORE_REPO_ENV=1
+export EXPO_NO_DOTENV=1
 export T3CODE_IOS_TEAM_ID="${T3CODE_IOS_TEAM_ID:-7492ZAHAJV}"
 export T3CODE_IOS_BUNDLE_ID="${T3CODE_IOS_BUNDLE_ID:-cloud.crandalls.t3code}"
 export T3CODE_MOBILE_APP_NAME="${T3CODE_MOBILE_APP_NAME:-T3 Code}"
@@ -117,6 +126,10 @@ export EXPO_NO_GIT_STATUS=1
 export EXPO_NO_TELEMETRY=1
 
 if [[ "$MODE" == "archive" && -z "${T3CODE_IOS_BUILD_NUMBER:-}" ]]; then
+  if [[ "$SKIP_PREBUILD" == "1" ]]; then
+    echo "[build-ios] Refusing --archive --skip-prebuild without T3CODE_IOS_BUILD_NUMBER: CFBundleVersion is baked during prebuild. Omit --skip-prebuild or pass T3CODE_IOS_BUILD_NUMBER matching the last prebuild." >&2
+    exit 1
+  fi
   export T3CODE_IOS_BUILD_NUMBER="$(date -u +%Y%m%d%H%M)"
 fi
 
@@ -139,9 +152,11 @@ cd "$MOBILE_DIR"
 
 # Evaluate resolved Expo config before prebuild/xcodebuild and fail closed on upstream leakage.
 CONFIG_JSON="$(./node_modules/.bin/expo config --json)"
-CONFIG_META="$(node -e '
+CONFIG_META="$(printf '%s' "$CONFIG_JSON" | node -e '
   const crypto = require("node:crypto");
-  const raw = process.argv[1];
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const raw = fs.readFileSync(0, "utf8");
   const forbidden = [
     "t3.codes",
     "pingdotgg",
@@ -149,20 +164,51 @@ CONFIG_META="$(node -e '
     "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
     "api.axiom.co",
   ];
-  const lower = raw.toLowerCase();
-  const leaked = forbidden.filter((token) => lower.includes(token.toLowerCase()));
+  const parsed = JSON.parse(raw);
+  const clerkKey = typeof parsed?.extra?.clerk?.publishableKey === "string"
+    ? parsed.extra.clerk.publishableKey
+    : "";
+  let decodedClerk = "";
+  const clerkMatch = clerkKey.match(/^pk_(?:live|test)_(.+)$/);
+  if (clerkMatch) {
+    decodedClerk = Buffer.from(clerkMatch[1], "base64").toString("utf8");
+  }
+  const haystack = `${raw}\n${decodedClerk}`.toLowerCase();
+  const leaked = forbidden.filter((token) => haystack.includes(token.toLowerCase()));
   if (leaked.length > 0) {
     console.error(`[build-ios] Refusing build: resolved Expo config references upstream values: ${leaked.join(", ")}`);
     process.exit(1);
   }
-  const parsed = JSON.parse(raw);
-  const fingerprint = crypto.createHash("sha256").update(raw).digest("hex");
+  const hash = crypto.createHash("sha256").update(raw);
+  const pluginsDir = path.join(process.cwd(), "plugins");
+  if (fs.existsSync(pluginsDir)) {
+    const stack = [pluginsDir];
+    const files = [];
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) stack.push(full);
+        else if (entry.isFile()) files.push(full);
+      }
+    }
+    files.sort();
+    for (const file of files) {
+      hash.update(path.relative(pluginsDir, file)).update("\0").update(fs.readFileSync(file)).update("\0");
+    }
+  }
+  const fingerprint = hash.digest("hex");
   const relay = typeof parsed?.extra?.relay?.url === "string" ? parsed.extra.relay.url : "";
-  process.stdout.write(`${fingerprint}\t${relay}\n`);
-' "$CONFIG_JSON")"
-IFS=$'\t' read -r CONFIG_FINGERPRINT RESOLVED_RELAY <<< "$CONFIG_META"
+  const teamId = typeof parsed?.ios?.appleTeamId === "string" ? parsed.ios.appleTeamId : "";
+  process.stdout.write(`${fingerprint}\t${teamId}\t${relay}\n`);
+')"
+IFS=$'\t' read -r CONFIG_FINGERPRINT RESOLVED_TEAM_ID RESOLVED_RELAY <<< "$CONFIG_META"
+if [[ -z "$RESOLVED_TEAM_ID" ]]; then
+  echo "[build-ios] Resolved Expo config is missing ios.appleTeamId." >&2
+  exit 1
+fi
 
-echo "[build-ios] mode=$MODE config=$CONFIGURATION team=$T3CODE_IOS_TEAM_ID bundle=$T3CODE_IOS_BUNDLE_ID scheme=$T3CODE_MOBILE_SCHEME build=${T3CODE_IOS_BUILD_NUMBER:-default} personal_caps=$PERSONAL_CAPABILITIES"
+echo "[build-ios] mode=$MODE config=$CONFIGURATION team=$RESOLVED_TEAM_ID bundle=$T3CODE_IOS_BUNDLE_ID scheme=$T3CODE_MOBILE_SCHEME build=${T3CODE_IOS_BUILD_NUMBER:-default} personal_caps=$PERSONAL_CAPABILITIES"
 if [[ -n "$RESOLVED_RELAY" ]]; then
   echo "[build-ios] relay=$RESOLVED_RELAY"
 else
@@ -178,6 +224,44 @@ if [[ "$SKIP_PREBUILD" == "1" ]]; then
 else
   echo "[build-ios] Running expo prebuild --clean --platform ios..."
   ./node_modules/.bin/expo prebuild --clean --platform ios
+  # Persist fork isolation env into ios/.xcode.env.local so direct Xcode GUI Run/Archive builds
+  # cannot fall back to root .env or upstream Ping defaults when EXConstants re-evaluates app.config.ts.
+  node -e '
+    const fs = require("node:fs");
+    const target = process.argv[1];
+    const keys = [
+      "APP_VARIANT",
+      "T3CODE_MOBILE_IGNORE_REPO_ENV",
+      "EXPO_NO_DOTENV",
+      "EXPO_NO_TELEMETRY",
+      "T3CODE_IOS_TEAM_ID",
+      "T3CODE_IOS_BUNDLE_ID",
+      "T3CODE_IOS_BUILD_NUMBER",
+      "T3CODE_MOBILE_APP_NAME",
+      "T3CODE_MOBILE_SCHEME",
+      "T3CODE_MOBILE_UPDATES_ENABLED",
+      "T3CODE_IOS_PERSONAL_TEAM",
+      "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID",
+      "T3CODE_RELAY_URL",
+      "T3CODE_CLERK_PUBLISHABLE_KEY",
+      "T3CODE_CLERK_JWT_TEMPLATE",
+      "T3CODE_IOS_RELYING_PARTY",
+      "T3CODE_EAS_PROJECT_ID",
+      "T3CODE_EXPO_OWNER",
+      "T3CODE_IOS_APPLE_SIGN_IN",
+      "EXPO_PUBLIC_OTLP_TRACES_URL",
+      "EXPO_PUBLIC_OTLP_TRACES_DATASET",
+      "EXPO_PUBLIC_OTLP_TRACES_TOKEN",
+    ];
+    const lines = ["", "# Private fork build isolation (written by copilot-fork/build-ios-app.sh)"];
+    for (const key of keys) {
+      const value = process.env[key];
+      if (value !== undefined) {
+        lines.push(`export ${key}=\x27${value.replace(/\x27/g, "\x27\\\x27\x27")}\x27`);
+      }
+    }
+    fs.appendFileSync(target, `${lines.join("\n")}\n`, "utf8");
+  ' "$MOBILE_DIR/ios/.xcode.env.local"
   printf '%s\n' "$CONFIG_FINGERPRINT" > "$FINGERPRINT_FILE"
 fi
 
@@ -223,7 +307,7 @@ case "$MODE" in
       -sdk iphoneos \
       -destination "generic/platform=iOS" \
       -derivedDataPath "$DERIVED_DATA" \
-      DEVELOPMENT_TEAM="$T3CODE_IOS_TEAM_ID" \
+      DEVELOPMENT_TEAM="$RESOLVED_TEAM_ID" \
       ${XCODE_EXTRA_ARGS[@]+"${XCODE_EXTRA_ARGS[@]}"} \
       build
     APP_BUNDLE="$DERIVED_DATA/Build/Products/${CONFIGURATION}-iphoneos/${SCHEME}.app"
@@ -242,7 +326,7 @@ case "$MODE" in
       -sdk iphoneos \
       -destination "generic/platform=iOS" \
       -archivePath "$ARCHIVE_OUT" \
-      DEVELOPMENT_TEAM="$T3CODE_IOS_TEAM_ID" \
+      DEVELOPMENT_TEAM="$RESOLVED_TEAM_ID" \
       ${XCODE_EXTRA_ARGS[@]+"${XCODE_EXTRA_ARGS[@]}"} \
       archive
     echo "[build-ios] Archive succeeded: $ARCHIVE_OUT"

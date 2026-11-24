@@ -36,7 +36,7 @@ const customIosBuildNumber = repoEnv.T3CODE_IOS_BUILD_NUMBER?.trim() || undefine
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/;
 const URL_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*$/;
-const IOS_BUILD_NUMBER_PATTERN = /^[0-9]+(?:\.[0-9]+)*$/;
+const IOS_BUILD_NUMBER_PATTERN = /^[0-9]+(?:\.[0-9]+){0,2}$/;
 
 // Compiled into the native project. Without a relay, Observe's native side could dispatch to
 // Expo's own ingest before observe.ts turns it off; `.invalid` never resolves (RFC 6761).
@@ -441,7 +441,7 @@ const config: ExpoConfig = {
         mode: APP_VARIANT === "development" ? "development" : "production",
       },
     ],
-    // Gate Clerk here: withoutIosPersonalTeamCapabilities runs too early to strip its entitlement.
+    // @clerk/expo adds Sign in with Apple entitlement unless appleSignIn is false.
     ["@clerk/expo", { theme: "./clerk-theme.json", appleSignIn: appleSignInEnabled }],
     "expo-web-browser",
     [
