@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.vite-plus/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+MOBILE_DIR="$REPO_ROOT/apps/mobile"
+
+MODE="simulator"
+CONFIGURATION="Release"
+PERSONAL_CAPABILITIES="0"
+SKIP_PREBUILD="0"
+ALLOW_PROVISIONING_UPDATES="0"
+SIMULATOR_NAME="${T3CODE_IOS_SIMULATOR:-iPhone 17}"
+ARCHIVE_PATH=""
+
+usage() {
+  cat <<'EOF'
+Usage: copilot-fork/build-ios-app.sh [options]
+
+Builds a private-fork iOS app with your Apple Developer Team and bundle ID,
+with upstream Ping EAS updates, associated domains, and Axiom defaults disabled.
+
+Modes (pick one, default: --simulator):
+  --prebuild                   Run Expo prebuild + CocoaPods install only
+  --simulator                  Prebuild and compile for iOS Simulator
+  --device                     Prebuild and build signed iOS device bundle
+  --archive                    Prebuild and create an .xcarchive for TestFlight
+
+Options:
+  --configuration <Debug|Release>  Xcode configuration (default: Release)
+  --personal-capabilities          Strip Push/Widgets/Sharing/App Groups so a
+                                   wildcard provisioning profile can sign it
+  --allow-provisioning-updates     Pass -allowProvisioningUpdates to xcodebuild
+  --skip-prebuild                  Reuse existing apps/mobile/ios native project
+  --simulator-name <name>          Simulator device name (default: iPhone 17)
+  --archive-path <path>            Output .xcarchive path for --archive
+  -h, --help                       Show this help
+
+Environment overrides (also loaded from .env.ios.local if present):
+  T3CODE_IOS_TEAM_ID               Apple Team ID (default: 7492ZAHAJV)
+  T3CODE_IOS_BUNDLE_ID             iOS bundle ID (default: cloud.crandalls.t3code)
+  T3CODE_MOBILE_APP_NAME           Display name (default: T3 Code)
+  T3CODE_MOBILE_SCHEME             URL scheme (default: t3code-private)
+  T3CODE_RELAY_URL                 Optional self-hosted Cloudflare relay HTTPS URL
+  T3CODE_HOSTED_APP_URL            Optional self-hosted web app HTTPS URL
+  T3CODE_CLERK_PUBLISHABLE_KEY     Optional custom Clerk publishable key
+  T3CODE_CLERK_JWT_TEMPLATE        Optional custom Clerk JWT template
+  T3CODE_IOS_RELYING_PARTY         Optional custom Clerk relying party domain
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prebuild) MODE="prebuild"; shift ;;
+    --simulator) MODE="simulator"; shift ;;
+    --device) MODE="device"; shift ;;
+    --archive) MODE="archive"; shift ;;
+    --configuration)
+      [[ $# -ge 2 ]] || { echo "Missing value for --configuration" >&2; exit 1; }
+      CONFIGURATION="$2"; shift 2 ;;
+    --personal-capabilities) PERSONAL_CAPABILITIES="1"; shift ;;
+    --allow-provisioning-updates) ALLOW_PROVISIONING_UPDATES="1"; shift ;;
+    --skip-prebuild) SKIP_PREBUILD="1"; shift ;;
+    --simulator-name)
+      [[ $# -ge 2 ]] || { echo "Missing value for --simulator-name" >&2; exit 1; }
+      SIMULATOR_NAME="$2"; shift 2 ;;
+    --archive-path)
+      [[ $# -ge 2 ]] || { echo "Missing value for --archive-path" >&2; exit 1; }
+      ARCHIVE_PATH="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+# Load optional local overrides without clobbering env vars already set by caller.
+if [[ -f "$REPO_ROOT/.env.ios.local" ]]; then
+  while IFS='=' read -r raw_key raw_val || [[ -n "$raw_key" ]]; do
+    key="${raw_key#"${raw_key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "[build-ios] Ignoring invalid key in .env.ios.local: $key" >&2
+      continue
+    fi
+    val="${raw_val%$'\r'}"
+    val="${val#\"}"
+    val="${val%\"}"
+    val="${val#\'}"
+    val="${val%\'}"
+    if [[ -z "${!key+x}" ]]; then
+      export "$key=$val"
+    fi
+  done < "$REPO_ROOT/.env.ios.local"
+fi
+
+export APP_VARIANT="${APP_VARIANT:-production}"
+export T3CODE_IOS_TEAM_ID="${T3CODE_IOS_TEAM_ID:-7492ZAHAJV}"
+export T3CODE_IOS_BUNDLE_ID="${T3CODE_IOS_BUNDLE_ID:-cloud.crandalls.t3code}"
+export T3CODE_MOBILE_APP_NAME="${T3CODE_MOBILE_APP_NAME:-T3 Code}"
+export T3CODE_MOBILE_SCHEME="${T3CODE_MOBILE_SCHEME:-t3code-private}"
+export T3CODE_MOBILE_UPDATES_ENABLED="${T3CODE_MOBILE_UPDATES_ENABLED:-0}"
+export EXPO_NO_GIT_STATUS=1
+export EXPO_NO_TELEMETRY=1
+
+if [[ "$PERSONAL_CAPABILITIES" == "1" ]]; then
+  export T3CODE_IOS_PERSONAL_TEAM=1
+  export T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID="$T3CODE_IOS_BUNDLE_ID"
+fi
+
+if ! command -v pod >/dev/null 2>&1; then
+  echo "[build-ios] CocoaPods (pod) not found. Install with: brew install cocoapods" >&2
+  exit 1
+fi
+
+if [[ ! -x "$MOBILE_DIR/node_modules/.bin/expo" ]]; then
+  echo "[build-ios] Missing $MOBILE_DIR/node_modules/.bin/expo. Run vp install first." >&2
+  exit 1
+fi
+
+echo "[build-ios] mode=$MODE config=$CONFIGURATION team=$T3CODE_IOS_TEAM_ID bundle=$T3CODE_IOS_BUNDLE_ID scheme=$T3CODE_MOBILE_SCHEME personal_caps=$PERSONAL_CAPABILITIES"
+if [[ -n "${T3CODE_RELAY_URL:-}" ]]; then
+  echo "[build-ios] relay=$T3CODE_RELAY_URL"
+else
+  echo "[build-ios] relay=(none - direct LAN/Tailscale pairing only; zero T3 Connect traffic)"
+fi
+
+cd "$MOBILE_DIR"
+
+if [[ "$SKIP_PREBUILD" != "1" ]]; then
+  echo "[build-ios] Running expo prebuild --clean --platform ios..."
+  ./node_modules/.bin/expo prebuild --clean --platform ios
+fi
+
+WORKSPACE="$(find "$MOBILE_DIR/ios" -maxdepth 1 -name '*.xcworkspace' | head -n 1)"
+if [[ -z "$WORKSPACE" ]]; then
+  echo "[build-ios] No .xcworkspace generated under $MOBILE_DIR/ios" >&2
+  exit 1
+fi
+SCHEME="$(basename "$WORKSPACE" .xcworkspace)"
+DERIVED_DATA="$MOBILE_DIR/ios/build/DerivedData"
+
+if [[ "$MODE" == "prebuild" ]]; then
+  echo "[build-ios] Prebuild complete: $WORKSPACE (scheme: $SCHEME)"
+  exit 0
+fi
+
+XCODE_EXTRA_ARGS=()
+if [[ "$ALLOW_PROVISIONING_UPDATES" == "1" ]]; then
+  XCODE_EXTRA_ARGS+=(-allowProvisioningUpdates)
+fi
+
+case "$MODE" in
+  simulator)
+    echo "[build-ios] Building $SCHEME ($CONFIGURATION) for iOS Simulator ($SIMULATOR_NAME)..."
+    xcodebuild \
+      -workspace "$WORKSPACE" \
+      -scheme "$SCHEME" \
+      -configuration "$CONFIGURATION" \
+      -sdk iphonesimulator \
+      -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
+      -derivedDataPath "$DERIVED_DATA" \
+      CODE_SIGNING_ALLOWED=NO \
+      build
+    APP_BUNDLE="$DERIVED_DATA/Build/Products/${CONFIGURATION}-iphonesimulator/${SCHEME}.app"
+    echo "[build-ios] Simulator build succeeded: $APP_BUNDLE"
+    ;;
+  device)
+    echo "[build-ios] Building signed $SCHEME ($CONFIGURATION) for generic iOS device..."
+    xcodebuild \
+      -workspace "$WORKSPACE" \
+      -scheme "$SCHEME" \
+      -configuration "$CONFIGURATION" \
+      -sdk iphoneos \
+      -destination "generic/platform=iOS" \
+      -derivedDataPath "$DERIVED_DATA" \
+      DEVELOPMENT_TEAM="$T3CODE_IOS_TEAM_ID" \
+      ${XCODE_EXTRA_ARGS[@]+"${XCODE_EXTRA_ARGS[@]}"} \
+      build
+    APP_BUNDLE="$DERIVED_DATA/Build/Products/${CONFIGURATION}-iphoneos/${SCHEME}.app"
+    echo "[build-ios] Device build succeeded: $APP_BUNDLE"
+    ;;
+  archive)
+    ARCHIVE_OUT="${ARCHIVE_PATH:-$MOBILE_DIR/ios/build/${SCHEME}.xcarchive}"
+    rm -rf "$ARCHIVE_OUT"
+    echo "[build-ios] Archiving $SCHEME ($CONFIGURATION) to $ARCHIVE_OUT..."
+    xcodebuild \
+      -workspace "$WORKSPACE" \
+      -scheme "$SCHEME" \
+      -configuration "$CONFIGURATION" \
+      -sdk iphoneos \
+      -destination "generic/platform=iOS" \
+      -archivePath "$ARCHIVE_OUT" \
+      DEVELOPMENT_TEAM="$T3CODE_IOS_TEAM_ID" \
+      ${XCODE_EXTRA_ARGS[@]+"${XCODE_EXTRA_ARGS[@]}"} \
+      archive
+    echo "[build-ios] Archive succeeded: $ARCHIVE_OUT"
+    echo "[build-ios] Upload to TestFlight via Xcode Organizer: open \"$ARCHIVE_OUT\""
+    ;;
+esac

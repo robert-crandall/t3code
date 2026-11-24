@@ -16,8 +16,23 @@ const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
 
+const UPSTREAM_APPLE_TEAM_ID = "ARK85ZXQ4Z";
+const UPSTREAM_EAS_PROJECT_ID = "d763fcb8-d37c-41ea-a773-b54a0ab4a454";
+const UPSTREAM_EXPO_OWNER = "pingdotgg";
+
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
+const customIosBundleIdentifier = repoEnv.T3CODE_IOS_BUNDLE_ID?.trim();
+const customIosTeamId = repoEnv.T3CODE_IOS_TEAM_ID?.trim();
+const customAppName = repoEnv.T3CODE_MOBILE_APP_NAME?.trim();
+const customScheme = repoEnv.T3CODE_MOBILE_SCHEME?.trim();
+const customRelyingParty = repoEnv.T3CODE_IOS_RELYING_PARTY?.trim();
+const customHostedAppUrl = repoEnv.T3CODE_HOSTED_APP_URL?.trim();
+const customEasProjectId = repoEnv.T3CODE_EAS_PROJECT_ID?.trim();
+const customExpoOwner = repoEnv.T3CODE_EXPO_OWNER?.trim();
+
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/;
+const URL_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*$/;
 
 // Compiled into the native project. Without a relay, Observe's native side could dispatch to
 // Expo's own ingest before observe.ts turns it off; `.invalid` never resolves (RFC 6761).
@@ -28,15 +43,52 @@ const observeEndpointUrl = repoEnv.T3CODE_RELAY_URL?.trim()
 const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
 const androidAdaptiveForeground = "./assets/android-icon-foreground.png";
 
+if (customIosBundleIdentifier && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(customIosBundleIdentifier)) {
+  throw new Error(
+    "T3CODE_IOS_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code.",
+  );
+}
+
+if (customIosTeamId && !APPLE_TEAM_ID_PATTERN.test(customIosTeamId)) {
+  throw new Error("T3CODE_IOS_TEAM_ID must be a 10-character Apple Team ID.");
+}
+
+if (customScheme && !URL_SCHEME_PATTERN.test(customScheme)) {
+  throw new Error("T3CODE_MOBILE_SCHEME must be a lowercase URL scheme such as t3code-private.");
+}
+
+if (customRelyingParty && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(customRelyingParty)) {
+  throw new Error("T3CODE_IOS_RELYING_PARTY must be a bare hostname such as clerk.example.com.");
+}
+
+const resolvedPersonalTeamBundleId = personalTeamBundleIdentifier || customIosBundleIdentifier;
 if (
   isIosPersonalTeamBuild &&
-  (!personalTeamBundleIdentifier ||
-    !IOS_BUNDLE_IDENTIFIER_PATTERN.test(personalTeamBundleIdentifier))
+  (!resolvedPersonalTeamBundleId ||
+    !IOS_BUNDLE_IDENTIFIER_PATTERN.test(resolvedPersonalTeamBundleId))
 ) {
   throw new Error(
     "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
   );
 }
+
+function parseHttpsHost(value: string | undefined, envName: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${envName} must be a valid https:// URL.`);
+  }
+  if (parsed.protocol !== "https:" || !parsed.host) {
+    throw new Error(`${envName} must be a valid https:// URL.`);
+  }
+  return parsed.host;
+}
+
+const customHostedAppHost = parseHttpsHost(customHostedAppUrl, "T3CODE_HOSTED_APP_URL");
 
 const DEVELOPMENT_ASSETS = {
   appIcon: fromRepoRoot(BRAND_ASSET_PATHS.developmentIosIconPng),
@@ -121,8 +173,29 @@ const variant = VARIANT_CONFIG[APP_VARIANT];
 // Copied thread links open the app. app.t3.codes/.well-known lists every variant's identifiers.
 const HOSTED_APP_HOST = "app.t3.codes";
 const iosBundleIdentifier = isIosPersonalTeamBuild
-  ? personalTeamBundleIdentifier!
-  : variant.iosBundleIdentifier;
+  ? resolvedPersonalTeamBundleId!
+  : (customIosBundleIdentifier ?? variant.iosBundleIdentifier);
+const appleTeamId = customIosTeamId ?? UPSTREAM_APPLE_TEAM_ID;
+const isCustomIosIdentity = Boolean(
+  isIosPersonalTeamBuild ||
+  iosBundleIdentifier !== variant.iosBundleIdentifier ||
+  appleTeamId !== UPSTREAM_APPLE_TEAM_ID,
+);
+
+const hostedAppHost = customHostedAppHost ?? (isCustomIosIdentity ? undefined : HOSTED_APP_HOST);
+const relyingParty = customRelyingParty ?? (isCustomIosIdentity ? undefined : variant.relyingParty);
+const associatedDomains = [
+  ...(relyingParty ? [`applinks:${relyingParty}`, `webcredentials:${relyingParty}`] : []),
+  ...(hostedAppHost ? [`applinks:${hostedAppHost}`] : []),
+];
+
+const easProjectId =
+  customEasProjectId ?? (isCustomIosIdentity ? undefined : UPSTREAM_EAS_PROJECT_ID);
+const expoOwner = customExpoOwner ?? (isCustomIosIdentity ? undefined : UPSTREAM_EXPO_OWNER);
+const updatesEnabled = Boolean(easProjectId) && repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0";
+const appleSignInEnabled = isCustomIosIdentity
+  ? !isIosPersonalTeamBuild && repoEnv.T3CODE_IOS_APPLE_SIGN_IN === "1"
+  : !isIosPersonalTeamBuild;
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -233,10 +306,10 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 // Match iOS PostScript names on Android so RN and the native composer share fonts before runtime loading.
 
 const config: ExpoConfig = {
-  name: variant.appName,
+  name: customAppName ?? variant.appName,
   slug: "t3-code",
   platforms: ["ios", "android"],
-  scheme: variant.scheme,
+  scheme: customScheme ?? variant.scheme,
   version: repoEnv.T3CODE_MOBILE_VERSION ?? "2.3.0",
   runtimeVersion: {
     // Skip costly fingerprinting on dev launches; preview and production OTAs require matching native projects.
@@ -245,26 +318,29 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
-  updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 0,
-  },
+  updates: updatesEnabled
+    ? {
+        enabled: true,
+        url: `https://u.expo.dev/${easProjectId}`,
+        checkAutomatically: "ON_LOAD",
+        fallbackToCacheTimeout: 0,
+      }
+    : {
+        enabled: false,
+        ...(easProjectId ? { url: `https://u.expo.dev/${easProjectId}` } : {}),
+        checkAutomatically: "NEVER",
+        fallbackToCacheTimeout: 0,
+      },
   ios: {
     icon: variant.assets.iosIcon,
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-      `applinks:${HOSTED_APP_HOST}`,
-    ],
+    appleTeamId,
+    ...(associatedDomains.length > 0 ? { associatedDomains } : {}),
     entitlements: {
-      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${iosBundleIdentifier}`],
     },
     infoPlist: {
       UISupportedInterfaceOrientations: [
@@ -314,19 +390,25 @@ const config: ExpoConfig = {
     predictiveBackGestureEnabled: true,
     // expo-sensors declares this for its pedometer, which the app does not use.
     blockedPermissions: ["android.permission.ACTIVITY_RECOGNITION"],
-    intentFilters: [
-      {
-        action: "VIEW",
-        autoVerify: true,
-        data: [{ scheme: "https", host: HOSTED_APP_HOST, pathPrefix: "/threads/" }],
-        category: ["BROWSABLE", "DEFAULT"],
-      },
-    ],
+    ...(hostedAppHost
+      ? {
+          intentFilters: [
+            {
+              action: "VIEW",
+              autoVerify: true,
+              data: [{ scheme: "https", host: hostedAppHost, pathPrefix: "/threads/" }],
+              category: ["BROWSABLE", "DEFAULT"],
+            },
+          ],
+        }
+      : {}),
   },
   web: {
     favicon: variant.assets.appIcon,
   },
   plugins: [
+    // Mods run in reverse order; register first so it strips entitlements added by plugins below.
+    ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
     "expo-asset",
     [
       "expo-font",
@@ -371,7 +453,7 @@ const config: ExpoConfig = {
       },
     ],
     // Gate Clerk here: withoutIosPersonalTeamCapabilities runs too early to strip its entitlement.
-    ["@clerk/expo", { theme: "./clerk-theme.json", appleSignIn: !isIosPersonalTeamBuild }],
+    ["@clerk/expo", { theme: "./clerk-theme.json", appleSignIn: appleSignInEnabled }],
     "expo-web-browser",
     [
       "expo-quick-actions",
@@ -467,7 +549,6 @@ const config: ExpoConfig = {
     // MainActivity mods run in reverse order; extend the tablet-orientation override.
     "./plugins/withAndroidWindowDisplayMetrics.cjs",
     "./plugins/withAndroidTabletOrientation.cjs",
-    ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
   ],
   extra: {
     appVariant: APP_VARIANT,
@@ -485,16 +566,18 @@ const config: ExpoConfig = {
     EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID,
     EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME,
     observability: {
-      tracesUrl: repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL ?? "https://api.axiom.co/v1/traces",
+      tracesUrl:
+        repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL ??
+        (isCustomIosIdentity ? null : "https://api.axiom.co/v1/traces"),
       tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET ?? null,
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
     eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+      ...(easProjectId ? { projectId: easProjectId } : {}),
       observe: { endpointUrl: observeEndpointUrl },
     },
   },
-  owner: "pingdotgg",
+  ...(expoOwner ? { owner: expoOwner } : {}),
   experiments: {
     // Metro only runs babel-plugin-react-compiler when this is set; see src/reactCompilerCoverage.test.ts.
     reactCompiler: true,
