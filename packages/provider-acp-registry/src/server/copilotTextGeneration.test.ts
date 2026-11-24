@@ -235,6 +235,7 @@ describe("Copilot text generation", () => {
       const reviewError = yield* Effect.flip(
         review.textGeneration.generateReviewGuide({
           cwd: process.cwd(),
+          projectCwd: process.cwd(),
           number: 1,
           title: "Title",
           description: "",
