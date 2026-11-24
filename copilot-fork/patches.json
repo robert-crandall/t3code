@@ -4,15 +4,15 @@
   "forkRepo": "robert-crandall/t3code",
   "integrationBranch": "main",
   "upstreamBaseBranch": "main",
-  "lastUpstreamMainSha": "fab237d62629925f271f4b48f2ffa4eedc95a271",
+  "lastUpstreamMainSha": "43cd52fc3f818b3175f421f6b42349400b3a9979",
   "patches": [
     {
       "pr": 36617,
       "url": "https://github.com/pingdotgg/t3code/pull/36617",
       "title": "fix(acp-registry): composer show reasoning effort picker; delegate_task can choose effort level",
-      "status": "integrated",
+      "status": "merged_upstream",
       "reviewedHeadSha": "bfff893023bdc77b837edd1538f844bcaeaa532d",
-      "notes": "Cleanly enables reasoning effort picker in composer and delegate_task effort forwarding for Copilot ACP."
+      "notes": "Closed upstream on 2026-11-24 after pingdotgg/t3code#41850 (8a9e8d12a8) landed canonical per-model probe/session option discovery and disk persistence (learnedModelOptions.ts); interim borrowing hunks in driver.ts and driver.test.ts dropped in favor of upstream/main."
     },
     {
       "pr": 34853,
@@ -44,7 +44,7 @@
       "title": "fix(acp-registry): match registry-id basenames for copilot, kimi, and claude",
       "status": "integrated",
       "reviewedHeadSha": "ebab0f0304c12d9ec3075581cc47b0fe926377fd",
-      "notes": "Updated shared isCopilotAcpRegistrySettings in settings.ts for github-copilot-cli local binaries and extended Claude local command regex to match both claude-acp and claude-agent-acp."
+      "notes": "Updated shared isCopilotAcpRegistrySettings in settings.ts for github-copilot-cli local binaries and extended Claude local command regex to match both claude-acp and claude-agent-acp. Closed upstream on 2026-11-24 under factory:acp-specific vendor policy (same as #32976); retained cleanly in fork."
     },
     {
       "pr": 26438,
@@ -187,7 +187,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/39362",
       "title": "fix(antigravity): defer optional T3 MCP tools via tool_call proxy",
       "status": "skipped",
-      "reviewedHeadSha": "2c9d50878ea020decd04dfe11501c99db8eb27c0",
+      "reviewedHeadSha": "bcdf758006e9c65ffee333c33da92ff96e9e78a3",
       "skipReason": "Antigravity-only (+816/-69) MCP proxy change; Copilot optional T3 tools are already covered by #37799."
     },
     {
@@ -195,7 +195,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/39606",
       "title": "fix(acp-registry): give local devin commands the Devin flavor",
       "status": "skipped",
-      "reviewedHeadSha": "67ae2fad0880c1f6d3482816b6486e24d4e49a2a",
+      "reviewedHeadSha": "3bfeeee2b1dceb9a684c3f5f309a786e237ce59f",
       "skipReason": "Devin-specific local command flavor change unrelated to Copilot ACP."
     },
     {
@@ -259,7 +259,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/40010",
       "title": "fix(server): explain provider failures caused by a full disk",
       "status": "skipped",
-      "reviewedHeadSha": "7497cd61cb8411e2cd3b5c680e26203e1e1a2eaa",
+      "reviewedHeadSha": "ba3a9f6528f7eb56cd85704aa190b79d690a0165",
       "skipReason": "Failing CI checks upstream (2 failures) and generic server disk error handling rather than Copilot/ACP."
     },
     {
@@ -307,7 +307,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/41337",
       "title": "fix(antigravity): normalize per-turn prompt usage at driver boundary",
       "status": "skipped",
-      "reviewedHeadSha": "e565888422a4d2c464e6af20cdff820d5ec9bc3c",
+      "reviewedHeadSha": "3612cd91d1181c3a500c64c7d615c0c988fa0e7f",
       "skipReason": "Antigravity-only prompt usage normalization unrelated to Copilot ACP."
     },
     {
@@ -333,6 +333,78 @@
       "status": "skipped",
       "reviewedHeadSha": "5757c81284c6b70f135f4cf81a0b1978ab4128f2",
       "skipReason": "Grok-specific process environment fix unrelated to Copilot ACP."
+    },
+    {
+      "pr": 42047,
+      "url": "https://github.com/pingdotgg/t3code/pull/42047",
+      "title": "fix(provider-acp): ACP approval cards name the file they ask to change",
+      "status": "skipped",
+      "reviewedHeadSha": "cc44222f99f236f95512bc43d6dd13d69c91536b",
+      "skipReason": "Stopped by upstream factory review (factory:stopped-not-proven): Kiro-focused approval prompt change that alters ID-only tracked kind inheritance affecting clientPolicyGrants session-grant matching, replaces generic card titles without sign-off, and has substring path-filtering and unbounded prompt length issues."
+    },
+    {
+      "pr": 42101,
+      "url": "https://github.com/pingdotgg/t3code/pull/42101",
+      "title": "fix(provider-acp): merge per-turn PromptResponse usage into contextUsage",
+      "status": "skipped",
+      "reviewedHeadSha": "b45ec725e2e2691543d68c4de085500beef0af30",
+      "skipReason": "Antigravity per-turn PromptResponse usage merge with 3 unaddressed correctness bugs on head (stale optional last* counters across turns, wiped restored cumulative totals on first usage_update after restart, and reset cumulative totals after compaction)."
+    },
+    {
+      "pr": 42195,
+      "url": "https://github.com/pingdotgg/t3code/pull/42195",
+      "title": "fix(provider-acp): Windows T3_ACP_MCP_CALL fallback calls resolve as T3 tools",
+      "status": "skipped",
+      "reviewedHeadSha": "ae3b9e78a4673cf27c5d2a4c208860a8e1e29197",
+      "skipReason": "Windows-only T3_ACP_MCP_CALL PowerShell command-line heuristic (+515 LOC) with failing Check and Test CI workflows and 9 open review findings; fork targets Linux and macOS."
+    },
+    {
+      "pr": 41698,
+      "url": "https://github.com/pingdotgg/t3code/pull/41698",
+      "title": "feat(server): rare MCP tools load as packs and stop counting against the tool budget",
+      "status": "skipped",
+      "reviewedHeadSha": "e8bdf1ed97d74cc47862728bbfcd26b2bc9b8401",
+      "skipReason": "Conflicting (+505/-59) MCP tool-pack experiment with 10 failing CI checks (Build and Typecheck, Check, Test Server 1-8) that conflicts directly with integrated #37799 (t3_help/t3_call)."
+    },
+    {
+      "pr": 40673,
+      "url": "https://github.com/pingdotgg/t3code/pull/40673",
+      "title": "fix(acp): auto-approve detached full-access permission requests when continuation cannot attach",
+      "status": "skipped",
+      "reviewedHeadSha": "5352266db7edbdd191e99b38f1e951edb1e35f29",
+      "skipReason": "Antigravity detached full-access auto-approval change (+307/-96) stopped by upstream pipeline without reproducible base defect; expands permission auto-approval surface without Copilot need."
+    },
+    {
+      "pr": 33168,
+      "url": "https://github.com/pingdotgg/t3code/pull/33168",
+      "title": "fix(acp): resolve zombie background tasks on cancel and turn completion",
+      "status": "skipped",
+      "reviewedHeadSha": "451faf086e13b9da820883d9f80376ffbc9f5c84",
+      "skipReason": "Invasive (+687/-5) Antigravity-focused background task cleanup refactor; Copilot runtime subagent retirement is already covered cleanly by integrated #32476."
+    },
+    {
+      "pr": 40707,
+      "url": "https://github.com/pingdotgg/t3code/pull/40707",
+      "title": "fix(acp-registry): refresh stale registry cache so installed agents update",
+      "status": "skipped",
+      "reviewedHeadSha": "b16dc3370b96297ef3e19609e91c13339ee6125c",
+      "skipReason": "Bloated (+16359/-2140) branch diff touching unrelated files."
+    },
+    {
+      "pr": 40714,
+      "url": "https://github.com/pingdotgg/t3code/pull/40714",
+      "title": "fix(acp-registry): periodic refreshes no longer revert new models to stale session state",
+      "status": "skipped",
+      "reviewedHeadSha": "b05ae47cf533eff4c8d3f08893761436fff1fbd8",
+      "skipReason": "Bloated (+11384/-877) branch diff and superseded by upstream #41850 learnedModelOptions persistence."
+    },
+    {
+      "pr": 42174,
+      "url": "https://github.com/pingdotgg/t3code/pull/42174",
+      "title": "fix(web): Esc clears the ACP Registry search without closing Add provider",
+      "status": "skipped",
+      "reviewedHeadSha": "a7eb0ab3a70f2a996c0df4fcf746897782750916",
+      "skipReason": "UI-only Escape-key polish in Add provider search; wait for upstream merge rather than carrying a custom web UI patch."
     }
   ]
 }
