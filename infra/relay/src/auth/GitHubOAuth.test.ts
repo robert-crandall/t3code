@@ -579,4 +579,60 @@ describe("GitHubOAuth", () => {
         });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
+
+  it.effect(
+    "rejects oversized OAuth POST bodies with 413 and falls through org 403 to a later allowed org",
+    () =>
+      Effect.gen(function* () {
+        const { app } = yield* makeTestApp({
+          allowedOrgs: ["sso-blocked-org", "robert-crandall-org"],
+          onGitHubRequest: (url) => {
+            if (url.endsWith("/user/memberships/orgs/sso-blocked-org")) {
+              return Response.json({ message: "SSO" }, { status: 403 });
+            }
+            return defaultGitHubMock()(url);
+          },
+        });
+
+        // Oversized POST body is rejected with 413 on unauthenticated OAuth POST routes.
+        const oversizedRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: `client_id=t3-cli&pad=${"x".repeat(20_000)}`,
+            }),
+          ),
+        );
+        expect(oversizedRes.status).toBe(413);
+
+        // Device auth + poll succeeds when org 1 returns 403 and org 2 returns 200 active.
+        const startRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/device", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ client_id: "t3-cli" }),
+            }),
+          ),
+        );
+        expect(startRes.status).toBe(200);
+        const startJson = (yield* Effect.promise(() => startRes.json())) as { device_code: string };
+
+        const pollRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+                client_id: "t3-cli",
+                device_code: startJson.device_code,
+              }),
+            }),
+          ),
+        );
+        expect(pollRes.status).toBe(200);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 });

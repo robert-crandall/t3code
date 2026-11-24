@@ -127,7 +127,7 @@ export const layer = Api.make(
       domain: relayPublicDomain,
       observability: {
         enabled: true,
-        logs: { enabled: true, invocationLogs: true },
+        logs: { enabled: true, invocationLogs: false },
       },
     })),
     Effect.orDie,

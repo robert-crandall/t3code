@@ -9,7 +9,9 @@ import * as Base64Url from "effect/encoding/Base64Url";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
@@ -29,6 +31,7 @@ const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 const GITHUB_SCOPES = "read:org user:email";
 // Stay under Api.ts's 9s RELAY_REQUEST_DEADLINE_MS with headroom for DB and signing.
 const GITHUB_REQUEST_TIMEOUT = Duration.seconds(7);
+const MAX_OAUTH_FORM_BODY_BYTES = 16_384;
 const GITHUB_USER_AGENT = "t3code-relay";
 
 const NO_STORE_HEADERS = {
@@ -165,11 +168,44 @@ function appendRedirectParams(
   return url.toString();
 }
 
+class OAuthBodyTooLarge extends Schema.TaggedError<OAuthBodyTooLarge>()("OAuthBodyTooLarge", {}) {}
+
+const isOAuthBodyTooLarge = Schema.is(OAuthBodyTooLarge);
+const textDecoder = new TextDecoder();
+
 const parseFormParams = Effect.fn("relay.oauth.parse_body")(function* (
   request: HttpServerRequest.HttpServerRequest,
 ) {
-  const rawText = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
-  return new URLSearchParams(rawText);
+  if (request.source instanceof Request && request.source.body === null) {
+    return Result.succeed(new URLSearchParams());
+  }
+  const chunks: Array<Uint8Array> = [];
+  let total = 0;
+  const readResult = yield* request.stream.pipe(
+    Stream.runForEach((chunk) => {
+      total += chunk.length;
+      if (total > MAX_OAUTH_FORM_BODY_BYTES) {
+        return Effect.fail(new OAuthBodyTooLarge());
+      }
+      chunks.push(chunk);
+      return Effect.void;
+    }),
+    Effect.result,
+  );
+  if (readResult._tag === "Failure") {
+    return Result.fail(
+      isOAuthBodyTooLarge(readResult.failure)
+        ? oauthErrorResponse("invalid_request", "Request body is too large.", 413)
+        : oauthErrorResponse("invalid_request", "Could not read request body.", 400),
+    );
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return Result.succeed(new URLSearchParams(textDecoder.decode(body)));
 });
 
 function githubOAuthUrls(config: RelayConfiguration.GitHubOAuthSettings) {
@@ -213,39 +249,62 @@ const verifyGitHubOrgMembership = Effect.fn("relay.oauth.verify_github_org_membe
     const httpClient = yield* HttpClient.HttpClient;
     const githubApiHeaders = makeGitHubApiHeaders(input.githubAccessToken);
 
-    for (const org of allowedOrgs) {
-      const membershipResponse = yield* HttpClientRequest.get(
-        `${apiBaseUrl}/user/memberships/orgs/${encodeURIComponent(org)}`,
-      ).pipe(
-        HttpClientRequest.setHeaders(githubApiHeaders),
-        httpClient.execute,
-        Effect.timeout(GITHUB_REQUEST_TIMEOUT),
-        Effect.mapError((cause) => new GitHubUpstreamError({ stage: "org-membership", cause })),
-      );
-      if (membershipResponse.status === 200) {
-        const membership = yield* decodeGitHubOrgMembership(membershipResponse).pipe(
-          Effect.mapError(
-            (cause) => new GitHubUpstreamError({ stage: "org-membership-decode", cause }),
-          ),
+    const checkOrgs = Effect.gen(function* () {
+      let lastUpstreamError: GitHubUpstreamError | undefined;
+      for (const org of allowedOrgs) {
+        const membershipResponse = yield* HttpClientRequest.get(
+          `${apiBaseUrl}/user/memberships/orgs/${encodeURIComponent(org)}`,
+        ).pipe(
+          HttpClientRequest.setHeaders(githubApiHeaders),
+          httpClient.execute,
+          Effect.mapError((cause) => new GitHubUpstreamError({ stage: "org-membership", cause })),
+          Effect.result,
         );
-        if (membership.state === "active") {
-          return;
+        if (membershipResponse._tag === "Failure") {
+          lastUpstreamError = membershipResponse.failure;
+          continue;
         }
-      } else if (membershipResponse.status === 401) {
-        return yield* new GitHubOrgMembershipDenied();
-      } else if (
-        membershipResponse.status === 403 ||
-        membershipResponse.status === 429 ||
-        membershipResponse.status >= 500
-      ) {
-        return yield* new GitHubUpstreamError({
-          stage: "org-membership",
-          cause: `GitHub org membership check returned HTTP ${membershipResponse.status}`,
-        });
+        if (membershipResponse.success.status === 200) {
+          const membership = yield* decodeGitHubOrgMembership(membershipResponse.success).pipe(
+            Effect.mapError(
+              (cause) => new GitHubUpstreamError({ stage: "org-membership-decode", cause }),
+            ),
+            Effect.result,
+          );
+          if (membership._tag === "Failure") {
+            lastUpstreamError = membership.failure;
+            continue;
+          }
+          if (membership.success.state === "active") {
+            return;
+          }
+        } else if (membershipResponse.success.status === 401) {
+          return yield* new GitHubOrgMembershipDenied();
+        } else if (
+          membershipResponse.success.status === 403 ||
+          membershipResponse.success.status === 429 ||
+          membershipResponse.success.status >= 500
+        ) {
+          lastUpstreamError = new GitHubUpstreamError({
+            stage: "org-membership",
+            cause: `GitHub org membership check returned HTTP ${membershipResponse.success.status}`,
+          });
+        }
       }
-    }
 
-    return yield* new GitHubOrgMembershipDenied();
+      if (lastUpstreamError !== undefined) {
+        return yield* lastUpstreamError;
+      }
+      return yield* new GitHubOrgMembershipDenied();
+    });
+
+    return yield* checkOrgs.pipe(
+      Effect.timeout(GITHUB_REQUEST_TIMEOUT),
+      Effect.catchTags({
+        TimeoutError: (cause) =>
+          Effect.fail(new GitHubUpstreamError({ stage: "org-membership-timeout", cause })),
+      }),
+    );
   },
 );
 
@@ -486,30 +545,46 @@ const handleGitHubCallback = Effect.gen(function* () {
 
   const issuer = normalizeRelayIssuer(config.relayIssuer);
   const { oauthBaseUrl } = githubOAuthUrls(config.githubOAuth);
-  const tokenExchange = yield* HttpClientRequest.post(
-    `${oauthBaseUrl}/login/oauth/access_token`,
-  ).pipe(
-    HttpClientRequest.setHeaders({
-      accept: "application/json",
-      "user-agent": GITHUB_USER_AGENT,
-    }),
-    HttpClientRequest.bodyUrlParams({
-      client_id: config.githubOAuth.clientId,
-      client_secret: Redacted.value(config.githubOAuth.clientSecret),
-      code: githubCode,
-      redirect_uri: `${issuer}/v1/auth/github/callback`,
-    }),
-    httpClient.execute,
-    Effect.timeout(GITHUB_REQUEST_TIMEOUT),
-    Effect.flatMap((response) =>
-      response.status === 200
-        ? decodeGitHubTokenExchange(response).pipe(Effect.mapError(() => "decode_error" as const))
-        : Effect.fail("bad_status" as const),
-    ),
-    Effect.option,
-  );
+  const callbackUpstream = yield* Effect.gen(function* () {
+    const tokenExchange = yield* HttpClientRequest.post(
+      `${oauthBaseUrl}/login/oauth/access_token`,
+    ).pipe(
+      HttpClientRequest.setHeaders({
+        accept: "application/json",
+        "user-agent": GITHUB_USER_AGENT,
+      }),
+      HttpClientRequest.bodyUrlParams({
+        client_id: config.githubOAuth.clientId,
+        client_secret: Redacted.value(config.githubOAuth.clientSecret),
+        code: githubCode,
+        redirect_uri: `${issuer}/v1/auth/github/callback`,
+      }),
+      httpClient.execute,
+      Effect.flatMap((response) =>
+        response.status === 200
+          ? decodeGitHubTokenExchange(response).pipe(Effect.mapError(() => "decode_error" as const))
+          : Effect.fail("bad_status" as const),
+      ),
+      Effect.option,
+    );
 
-  if (Option.isNone(tokenExchange) || !tokenExchange.value.access_token) {
+    if (Option.isNone(tokenExchange) || !tokenExchange.value.access_token) {
+      return { _tag: "TokenExchangeFailed" as const };
+    }
+
+    const identityResult = yield* fetchGitHubIdentityAndAuthorizeOrg({
+      githubAccessToken: tokenExchange.value.access_token,
+      githubOAuth: config.githubOAuth,
+    }).pipe(Effect.result);
+
+    return {
+      _tag: "IdentityChecked" as const,
+      githubAccessToken: tokenExchange.value.access_token,
+      identityResult,
+    };
+  }).pipe(Effect.timeoutOption(GITHUB_REQUEST_TIMEOUT));
+
+  if (Option.isNone(callbackUpstream) || callbackUpstream.value._tag === "TokenExchangeFailed") {
     return redirectResponse(
       appendRedirectParams(stateClaims.redirect_uri, {
         error: "server_error",
@@ -520,10 +595,7 @@ const handleGitHubCallback = Effect.gen(function* () {
     );
   }
 
-  const identityResult = yield* fetchGitHubIdentityAndAuthorizeOrg({
-    githubAccessToken: tokenExchange.value.access_token,
-    githubOAuth: config.githubOAuth,
-  }).pipe(Effect.result);
+  const { githubAccessToken, identityResult } = callbackUpstream.value;
 
   if (identityResult._tag === "Failure") {
     const error = identityResult.failure;
@@ -552,7 +624,7 @@ const handleGitHubCallback = Effect.gen(function* () {
   const expiresAtEpochSeconds = issuedAtEpochSeconds + RelayTokens.RELAY_OAUTH_CODE_TTL_SECONDS;
   const jti = yield* random.uuidV4();
   const encryptedGithubAccessToken = yield* sessions.sealSecret(
-    tokenExchange.value.access_token,
+    githubAccessToken,
     `code:${jti}:${stateClaims.client_id}`,
   );
   const oauthCode = yield* relayTokens
@@ -586,7 +658,11 @@ const handleDeviceAuthorization = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const now = yield* DateTime.now;
 
-  const params = yield* parseFormParams(request);
+  const parsedParams = yield* parseFormParams(request);
+  if (parsedParams._tag === "Failure") {
+    return parsedParams.failure;
+  }
+  const params = parsedParams.success;
   const clientId = params.get("client_id") ?? "";
   if (clientId !== CLI_OAUTH_CLIENT_ID) {
     return oauthErrorResponse("invalid_client", "Unsupported OAuth client_id.");
@@ -653,7 +729,11 @@ const handleToken = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const digest = yield* Digest.Digest;
 
-  const params = yield* parseFormParams(request);
+  const parsedParams = yield* parseFormParams(request);
+  if (parsedParams._tag === "Failure") {
+    return parsedParams.failure;
+  }
+  const params = parsedParams.success;
   const grantType = params.get("grant_type") ?? "";
   const clientId = params.get("client_id") ?? "";
 
@@ -736,57 +816,79 @@ const handleToken = Effect.gen(function* () {
     }
 
     const { oauthBaseUrl } = githubOAuthUrls(config.githubOAuth);
-    const poll = yield* HttpClientRequest.post(`${oauthBaseUrl}/login/oauth/access_token`).pipe(
-      HttpClientRequest.setHeaders({
-        accept: "application/json",
-        "user-agent": GITHUB_USER_AGENT,
-      }),
-      HttpClientRequest.bodyUrlParams({
-        client_id: config.githubOAuth.clientId,
-        device_code: deviceClaims.github_device_code,
-        grant_type: DEVICE_CODE_GRANT_TYPE,
-      }),
-      httpClient.execute,
-      Effect.timeout(GITHUB_REQUEST_TIMEOUT),
-      Effect.flatMap((response) =>
-        response.status === 200
-          ? decodeGitHubTokenExchange(response).pipe(Effect.mapError(() => "decode_error" as const))
-          : Effect.fail("bad_status" as const),
-      ),
-      Effect.option,
-    );
+    const deviceUpstream = yield* Effect.gen(function* () {
+      const poll = yield* HttpClientRequest.post(`${oauthBaseUrl}/login/oauth/access_token`).pipe(
+        HttpClientRequest.setHeaders({
+          accept: "application/json",
+          "user-agent": GITHUB_USER_AGENT,
+        }),
+        HttpClientRequest.bodyUrlParams({
+          client_id: config.githubOAuth.clientId,
+          device_code: deviceClaims.github_device_code,
+          grant_type: DEVICE_CODE_GRANT_TYPE,
+        }),
+        httpClient.execute,
+        Effect.flatMap((response) =>
+          response.status === 200
+            ? decodeGitHubTokenExchange(response).pipe(
+                Effect.mapError(() => "decode_error" as const),
+              )
+            : Effect.fail("bad_status" as const),
+        ),
+        Effect.option,
+      );
 
-    if (Option.isNone(poll)) {
+      if (Option.isNone(poll)) {
+        return { _tag: "PollFailed" as const };
+      }
+      if (poll.value.error) {
+        return {
+          _tag: "PollError" as const,
+          error: poll.value.error,
+          errorDescription: poll.value.error_description,
+        };
+      }
+      if (!poll.value.access_token) {
+        return { _tag: "EmptyAccessToken" as const };
+      }
+
+      const identityResult = yield* fetchGitHubIdentityAndAuthorizeOrg({
+        githubAccessToken: poll.value.access_token,
+        githubOAuth: config.githubOAuth,
+      }).pipe(Effect.result);
+
+      return {
+        _tag: "IdentityChecked" as const,
+        githubAccessToken: poll.value.access_token,
+        identityResult,
+      };
+    }).pipe(Effect.timeoutOption(GITHUB_REQUEST_TIMEOUT));
+
+    if (Option.isNone(deviceUpstream) || deviceUpstream.value._tag === "PollFailed") {
       return oauthErrorResponse("server_error", "Could not poll GitHub device authorization.", 502);
     }
-
-    if (poll.value.error) {
-      switch (poll.value.error) {
+    if (deviceUpstream.value._tag === "EmptyAccessToken") {
+      return oauthErrorResponse("server_error", "GitHub returned an empty access token.", 502);
+    }
+    if (deviceUpstream.value._tag === "PollError") {
+      switch (deviceUpstream.value.error) {
         case "authorization_pending":
         case "slow_down":
         case "expired_token":
         case "access_denied":
           return oauthErrorResponse(
-            poll.value.error,
-            poll.value.error_description ?? poll.value.error,
+            deviceUpstream.value.error,
+            deviceUpstream.value.errorDescription ?? deviceUpstream.value.error,
           );
         default:
           return oauthErrorResponse(
             "invalid_grant",
-            poll.value.error_description ?? "Device authorization failed.",
+            deviceUpstream.value.errorDescription ?? "Device authorization failed.",
           );
       }
     }
 
-    if (!poll.value.access_token) {
-      return oauthErrorResponse("server_error", "GitHub returned an empty access token.", 502);
-    }
-
-    const identityResult = yield* fetchGitHubIdentityAndAuthorizeOrg({
-      githubAccessToken: poll.value.access_token,
-      githubOAuth: config.githubOAuth,
-    }).pipe(Effect.result);
-
+    const { githubAccessToken, identityResult } = deviceUpstream.value;
     if (identityResult._tag === "Failure") {
       if (identityResult.failure._tag === "GitHubOrgMembershipDenied") {
         return oauthErrorResponse("access_denied", "GitHub organization membership required.");
@@ -801,7 +903,7 @@ const handleToken = Effect.gen(function* () {
         githubLogin: identity.githubLogin,
         ...(identity.email ? { email: identity.email } : {}),
         clientId,
-        githubAccessToken: poll.value.access_token,
+        githubAccessToken,
       })
       .pipe(Effect.result);
 
@@ -899,7 +1001,11 @@ const handleToken = Effect.gen(function* () {
 const handleRevoke = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const sessions = yield* OAuthSessions.OAuthSessions;
-  const params = yield* parseFormParams(request);
+  const parsedParams = yield* parseFormParams(request);
+  if (parsedParams._tag === "Failure") {
+    return parsedParams.failure;
+  }
+  const params = parsedParams.success;
   const token = params.get("token") ?? "";
   const clientId = params.get("client_id") ?? undefined;
 

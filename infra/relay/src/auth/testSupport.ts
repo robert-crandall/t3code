@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as RelayConfiguration from "../Config.ts";
 import * as RelayDb from "../db.ts";
@@ -109,15 +110,18 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
     }),
   } as unknown as RelayDb.RelayDb["Service"];
 
+  const txLock = yield* Semaphore.make(1);
   const transactions: RelayDb.RelayTransactions["Service"] = {
     withTransaction: (effect) =>
-      Effect.acquireUseRelease(
-        Effect.promise(() => pg.exec("BEGIN")),
-        () => effect,
-        (_, exit) =>
-          Effect.promise(() => pg.exec(exit._tag === "Success" ? "COMMIT" : "ROLLBACK")).pipe(
-            Effect.ignore,
-          ),
+      txLock.withPermits(1)(
+        Effect.acquireUseRelease(
+          Effect.promise(() => pg.exec("BEGIN")),
+          () => effect,
+          (_, exit) =>
+            Effect.promise(() => pg.exec(exit._tag === "Success" ? "COMMIT" : "ROLLBACK")).pipe(
+              Effect.ignore,
+            ),
+        ),
       ),
   };
 

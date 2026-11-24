@@ -284,9 +284,10 @@ describe("OAuthSessions", () => {
         expect(swappedResult).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
 
         // 3. Tampered ciphertext/tag fails AES-GCM verification.
+        // Mutate the first base64url character so byte 0 always changes (the last character
+        // carries 2 unused padding bits for a 32-byte AES-GCM ciphertext+tag).
         const [version, nonce, ciphertext] = originalEnvelopeA.split(".");
-        const tamperedCiphertext =
-          ciphertext!.slice(0, -1) + (ciphertext!.endsWith("A") ? "B" : "A");
+        const tamperedCiphertext = (ciphertext!.startsWith("A") ? "B" : "A") + ciphertext!.slice(1);
         yield* Effect.promise(() =>
           db
             .update(relayOauthSessions)
@@ -317,6 +318,78 @@ describe("OAuthSessions", () => {
           });
         }).pipe(Effect.provide(layerAuth));
         expect(malformedResult).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect(
+    "serializes concurrent refresh rotations so replay revokes the whole session, and rolls back failed updates",
+    () =>
+      Effect.gen(function* () {
+        let failUpdate = false;
+        const { layerAuth } = yield* setupPgliteOAuthTest({
+          failUpdate: () => failUpdate,
+        });
+
+        const created = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.create({
+            userId: "github:42",
+            githubLogin: "octocat",
+            clientId: "t3-cli",
+            githubAccessToken: "gho_concurrent_test",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(created._tag).toBe("Created");
+        if (created._tag !== "Created") return;
+
+        // Failed update inside rotate rolls back cleanly and keeps the original refresh token usable.
+        failUpdate = true;
+        const failedRotate = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions
+            .rotate({ refreshToken: created.refreshToken, clientId: "t3-cli" })
+            .pipe(Effect.result);
+        }).pipe(Effect.provide(layerAuth));
+        expect(failedRotate._tag).toBe("Failure");
+        failUpdate = false;
+
+        // Two simultaneous rotations with the same token: one rotates, the second triggers replay revocation.
+        const [first, second] = yield* Effect.all(
+          [
+            Effect.gen(function* () {
+              const sessions = yield* OAuthSessions.OAuthSessions;
+              return yield* sessions.rotate({
+                refreshToken: created.refreshToken,
+                clientId: "t3-cli",
+              });
+            }).pipe(Effect.provide(layerAuth)),
+            Effect.gen(function* () {
+              const sessions = yield* OAuthSessions.OAuthSessions;
+              return yield* sessions.rotate({
+                refreshToken: created.refreshToken,
+                clientId: "t3-cli",
+              });
+            }).pipe(Effect.provide(layerAuth)),
+          ],
+          { concurrency: "unbounded" },
+        );
+
+        const outcomes = [first, second];
+        const winner = outcomes.find((entry) => entry._tag === "Rotated");
+        const loser = outcomes.find((entry) => entry._tag === "InvalidGrant");
+        expect(winner?._tag).toBe("Rotated");
+        expect(loser).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+        if (!winner || winner._tag !== "Rotated") return;
+
+        // The replay committed revocation, so the winner's new refresh token is also rejected.
+        const postReplay = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: winner.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(postReplay).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

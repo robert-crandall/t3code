@@ -142,8 +142,13 @@ const PersistedToken = Schema.Struct({
   refreshToken: Schema.String,
   expiresAtEpochMs: Schema.Number,
   identity: Schema.optional(Schema.String),
+  issuer: Schema.optional(Schema.String),
 });
 export type PersistedToken = typeof PersistedToken.Type;
+
+function relayIssuerFromEndpoint(endpoint: string): string {
+  return new URL(endpoint).origin;
+}
 
 const PersistedTokenJson = Schema.fromJsonString(PersistedToken);
 const decodePersistedToken = Schema.decodeUnknownEffect(PersistedTokenJson);
@@ -314,6 +319,7 @@ function bytesToString(value: Uint8Array): string {
 const readTokenResponse = Effect.fn("cloud.cli_token.read_token_response")(function* (
   response: HttpClientResponse.HttpClientResponse,
   params: Record<string, string>,
+  issuer: string,
 ) {
   const body = yield* HttpClientResponse.schemaBodyJson(OAuthTokenResponse)(response);
   const now = yield* Clock.currentTimeMillis;
@@ -324,6 +330,7 @@ const readTokenResponse = Effect.fn("cloud.cli_token.read_token_response")(funct
       refreshToken: body.refresh_token ?? params.refresh_token ?? "",
       expiresAtEpochMs: now + body.expires_in * 1_000,
       ...(identity === null ? {} : { identity }),
+      issuer,
     } satisfies PersistedToken,
     identity,
   };
@@ -335,10 +342,11 @@ const exchangeToken = Effect.fn("cloud.cli_token.exchange")(function* (
 ) {
   const httpClient = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
   const startedAt = yield* Clock.monotonicTimeNanos;
+  const issuer = relayIssuerFromEndpoint(metadata.tokenEndpoint);
   return yield* HttpClientRequest.post(metadata.tokenEndpoint).pipe(
     HttpClientRequest.bodyUrlParams(params),
     httpClient.execute,
-    Effect.flatMap((response) => readTokenResponse(response, params)),
+    Effect.flatMap((response) => readTokenResponse(response, params, issuer)),
     Effect.timeout(OAUTH_REQUEST_TIMEOUT),
     Effect.catchTags({
       // The enclosing operation owns the span for this inline handler.
@@ -431,7 +439,11 @@ const pollDeviceToken = Effect.fn("cloud.cli_token.poll_device_token")(function*
       continue;
     }
     if (response.value.status >= 200 && response.value.status < 300) {
-      return yield* readTokenResponse(response.value, params);
+      return yield* readTokenResponse(
+        response.value,
+        params,
+        relayIssuerFromEndpoint(metadata.tokenEndpoint),
+      );
     }
     const failure = yield* HttpClientResponse.schemaBodyJson(OAuthErrorResponse)(response.value);
     switch (failure.error) {
@@ -499,15 +511,23 @@ export const make = Effect.gen(function* () {
   const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
   const semaphore = yield* Semaphore.make(1);
   const persist = Effect.fn("cloud.cli_token.persist")(function* (token: PersistedToken) {
-    const encoded = yield* encodePersistedToken(token);
+    const issuer =
+      token.issuer ?? relayIssuerFromEndpoint((yield* cloudCliOAuthConfig).tokenEndpoint);
+    const stamped: PersistedToken = { ...token, issuer };
+    const encoded = yield* encodePersistedToken(stamped);
     yield* secrets.set(CLOUD_CLI_OAUTH_TOKEN_SECRET, stringToBytes(encoded));
-    return token;
+    return stamped;
   });
 
   const read = Effect.fn("cloud.cli_token.read")(function* () {
     const encoded = yield* secrets.get(CLOUD_CLI_OAUTH_TOKEN_SECRET);
     if (Option.isNone(encoded)) return Option.none<PersistedToken>();
-    return Option.some(yield* decodePersistedToken(bytesToString(encoded.value)));
+    const decoded = yield* decodePersistedToken(bytesToString(encoded.value));
+    const expectedIssuer = relayIssuerFromEndpoint((yield* cloudCliOAuthConfig).tokenEndpoint);
+    if (decoded.issuer !== expectedIssuer) {
+      return Option.none<PersistedToken>();
+    }
+    return Option.some(decoded);
   });
 
   const revokeStoredRefreshToken = Effect.fn("cloud.cli_token.revoke_stored")(function* () {

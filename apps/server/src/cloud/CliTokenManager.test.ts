@@ -116,7 +116,12 @@ const tokenRequests = (requests: ReadonlyArray<RecordedTokenRequest>) =>
   requests.filter((request) => request.url.endsWith("/v1/auth/token"));
 
 const expiredStoredToken = new TextEncoder().encode(
-  JSON.stringify({ accessToken: "expired", refreshToken: "refresh-token-1", expiresAtEpochMs: 0 }),
+  JSON.stringify({
+    accessToken: "expired",
+    refreshToken: "refresh-token-1",
+    expiresAtEpochMs: 0,
+    issuer: "https://relay.example.test",
+  }),
 );
 
 const provideRefreshManager = (
@@ -414,6 +419,7 @@ it.live(
               refreshToken: "refresh-initial",
               expiresAtEpochMs: 1,
               identity: "theo@example.test",
+              issuer: "https://relay.example.test",
             }),
           ),
         );
@@ -548,6 +554,7 @@ it.effect(
             accessToken: "access-live",
             refreshToken: "refresh-live",
             expiresAtEpochMs: now + 3600_000,
+            issuer: "https://relay.example.test",
           }),
         ),
       );
@@ -607,6 +614,7 @@ it.effect(
             accessToken: "access-live-2",
             refreshToken: "refresh-live-2",
             expiresAtEpochMs: now + 3600_000,
+            issuer: "https://relay.example.test",
           }),
         ),
       );
@@ -681,6 +689,7 @@ it.live(
               refreshToken: "refresh-initial",
               expiresAtEpochMs: 1,
               identity: "theo@example.test",
+              issuer: "https://relay.example.test",
             }),
           ),
         );
@@ -705,4 +714,84 @@ it.live(
         assert.deepEqual(revokeTokens, ["refresh-rotated-before-clear"]);
       }).pipe(Effect.provide(NodeServices.layer), provideTestEnv),
     ),
+);
+
+it.effect("ignores stored credentials missing or mismatching the configured relay issuer", () =>
+  Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    let stored: Option.Option<Uint8Array> = Option.some(
+      new TextEncoder().encode(
+        JSON.stringify({
+          accessToken: "legacy-clerk-token",
+          refreshToken: "legacy-clerk-refresh",
+          expiresAtEpochMs: now + 3600_000,
+        }),
+      ),
+    );
+
+    const manager = yield* CliTokenManager.CloudCliTokenManager.pipe(
+      Effect.provide(
+        CliTokenManager.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              NodeCrypto.layer,
+              Layer.mock(ServerSecretStore.ServerSecretStore)({
+                get: () => Effect.sync(() => stored),
+                set: (_name, value) =>
+                  Effect.sync(() => {
+                    stored = Option.some(new Uint8Array(value));
+                  }),
+                remove: () =>
+                  Effect.sync(() => {
+                    stored = Option.none();
+                  }),
+              }),
+              Layer.succeed(
+                HttpClient.HttpClient,
+                HttpClient.make((request) =>
+                  Effect.succeed(
+                    HttpClientResponse.fromWeb(request, new Response(null, { status: 500 })),
+                  ),
+                ),
+              ),
+              Layer.mock(ExternalLauncher.ExternalLauncher)({
+                launchBrowser: () => Effect.void,
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    assert.isFalse(yield* manager.hasCredential);
+    assert.isTrue(Option.isNone(yield* manager.getExisting));
+
+    // A token issued by a different relay origin is also ignored.
+    stored = Option.some(
+      new TextEncoder().encode(
+        JSON.stringify({
+          accessToken: "other-relay-token",
+          refreshToken: "other-relay-refresh",
+          expiresAtEpochMs: now + 3600_000,
+          issuer: "https://other-relay.example.test",
+        }),
+      ),
+    );
+    assert.isFalse(yield* manager.hasCredential);
+    assert.isTrue(Option.isNone(yield* manager.getExisting));
+
+    // Storing via manager.store() stamps the configured relay issuer so reads succeed.
+    yield* manager.store({
+      accessToken: "relay-token",
+      refreshToken: "relay-refresh",
+      expiresAtEpochMs: now + 3600_000,
+    });
+    assert.isTrue(yield* manager.hasCredential);
+    const existing = yield* manager.getExisting;
+    assert.isTrue(Option.isSome(existing));
+    if (Option.isSome(existing)) {
+      assert.equal(existing.value.issuer, "https://relay.example.test");
+    }
+  }).pipe(provideTestEnv),
 );
