@@ -214,4 +214,109 @@ describe("OAuthSessions", () => {
         }).pipe(Effect.provide(layerAuth));
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
+
+  it.effect(
+    "fails closed when sealed GitHub token is tampered, swapped across sessions, malformed, or opened with a different key",
+    () =>
+      Effect.gen(function* () {
+        const { db, layerAuth, makeLayerAuth } = yield* setupPgliteOAuthTest();
+        yield* TestClock.setTime(Date.parse("2026-11-24T12:00:00.000Z"));
+
+        const created = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          const a = yield* sessions.create({
+            userId: "github:1",
+            githubLogin: "alice",
+            clientId: "t3-cli",
+            githubAccessToken: "gho_alice_secret",
+          });
+          const b = yield* sessions.create({
+            userId: "github:2",
+            githubLogin: "bob",
+            clientId: "t3-cli",
+            githubAccessToken: "gho_bob_secret",
+          });
+          if (a._tag !== "Created" || b._tag !== "Created") {
+            throw new Error("expected Created");
+          }
+          return { a, b };
+        }).pipe(Effect.provide(layerAuth));
+
+        const [rowA] = yield* Effect.promise(() =>
+          db
+            .select()
+            .from(relayOauthSessions)
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const [rowB] = yield* Effect.promise(() =>
+          db
+            .select()
+            .from(relayOauthSessions)
+            .where(eq(relayOauthSessions.id, created.b.sessionId)),
+        );
+        const originalEnvelopeA = rowA!.encryptedGithubAccessToken;
+        const originalEnvelopeB = rowB!.encryptedGithubAccessToken;
+
+        // 1. Different derived key (rotated GITHUB_OAUTH_CLIENT_SECRET) fails closed.
+        const rotatedKeyResult = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.a.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(makeLayerAuth("gh-rotated-secret")));
+        expect(rotatedKeyResult).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // 2. Swapped ciphertext between sessions fails AAD binding (session id mismatch).
+        yield* Effect.promise(() =>
+          db
+            .update(relayOauthSessions)
+            .set({ encryptedGithubAccessToken: originalEnvelopeB })
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const swappedResult = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.a.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(swappedResult).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // 3. Tampered ciphertext/tag fails AES-GCM verification.
+        const [version, nonce, ciphertext] = originalEnvelopeA.split(".");
+        const tamperedCiphertext =
+          ciphertext!.slice(0, -1) + (ciphertext!.endsWith("A") ? "B" : "A");
+        yield* Effect.promise(() =>
+          db
+            .update(relayOauthSessions)
+            .set({ encryptedGithubAccessToken: `${version}.${nonce}.${tamperedCiphertext}` })
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const tamperedResult = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.a.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(tamperedResult).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // 4. Malformed envelope fails closed.
+        yield* Effect.promise(() =>
+          db
+            .update(relayOauthSessions)
+            .set({ encryptedGithubAccessToken: "not-an-envelope" })
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const malformedResult = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.a.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(malformedResult).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 });

@@ -121,23 +121,6 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
       ),
   };
 
-  const config = RelayConfiguration.RelayConfiguration.of({
-    relayIssuer: "https://relay.crandalls.cloud",
-    apns: null,
-    apnsDeliveryJobSigningSecret: Redacted.make("job-secret"),
-    githubOAuth: {
-      clientId: "gh-client-123",
-      clientSecret: Redacted.make("gh-secret-456"),
-      allowedOrgs: options?.allowedOrgs ?? ["robert-crandall-org"],
-      oauthBaseUrl: "https://github.test",
-      apiBaseUrl: "https://api.github.test",
-    },
-    cloudMintPrivateKey: Redacted.make(spkiPair.privateKey),
-    cloudMintPublicKey: spkiPair.publicKey,
-    managedEndpointBaseDomain: undefined,
-    managedEndpointNamespace: undefined,
-  });
-
   const layerCrypto = Layer.mergeAll(
     Aead.layerWebCrypto,
     Digest.layerWebCrypto,
@@ -145,19 +128,35 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
     Signature.layerWebCrypto,
   ).pipe(Layer.provideMerge(SecureRandom.layerWebCrypto));
 
-  const layerBase = Layer.mergeAll(
-    RelayConfiguration.layer(config),
-    Layer.succeed(RelayDb.RelayDb, effectDb),
-    Layer.succeed(RelayDb.RelayTransactions, transactions),
-    layerCrypto,
-  );
+  const makeLayerAuth = (clientSecret = "gh-secret-456") => {
+    const configWithSecret = RelayConfiguration.RelayConfiguration.of({
+      relayIssuer: "https://relay.crandalls.cloud",
+      apns: null,
+      apnsDeliveryJobSigningSecret: Redacted.make("job-secret"),
+      githubOAuth: {
+        clientId: "gh-client-123",
+        clientSecret: Redacted.make(clientSecret),
+        allowedOrgs: options?.allowedOrgs ?? ["robert-crandall-org"],
+        oauthBaseUrl: "https://github.test",
+        apiBaseUrl: "https://api.github.test",
+      },
+      cloudMintPrivateKey: Redacted.make(spkiPair.privateKey),
+      cloudMintPublicKey: spkiPair.publicKey,
+      managedEndpointBaseDomain: undefined,
+      managedEndpointNamespace: undefined,
+    });
+    const layerBase = Layer.mergeAll(
+      RelayConfiguration.layer(configWithSecret),
+      Layer.succeed(RelayDb.RelayDb, effectDb),
+      Layer.succeed(RelayDb.RelayTransactions, transactions),
+      layerCrypto,
+    );
+    const layerRelayTokens = RelayTokens.layer.pipe(
+      Layer.provideMerge(CloudMintSigner.layer),
+      Layer.provideMerge(layerBase),
+    );
+    return OAuthSessions.layer.pipe(Layer.provideMerge(layerRelayTokens));
+  };
 
-  const layerRelayTokens = RelayTokens.layer.pipe(
-    Layer.provideMerge(CloudMintSigner.layer),
-    Layer.provideMerge(layerBase),
-  );
-
-  const layerAuth = OAuthSessions.layer.pipe(Layer.provideMerge(layerRelayTokens));
-
-  return { db, layerAuth };
+  return { db, layerAuth: makeLayerAuth(), makeLayerAuth };
 });

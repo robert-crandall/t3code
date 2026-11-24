@@ -27,7 +27,8 @@ const OAUTH_NONCE_COOKIE = "__Host-t3_oauth_nonce";
 const DEFAULT_GITHUB_OAUTH_BASE_URL = "https://github.com";
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 const GITHUB_SCOPES = "read:org user:email";
-const GITHUB_REQUEST_TIMEOUT = Duration.seconds(10);
+// Stay under Api.ts's 9s RELAY_REQUEST_DEADLINE_MS with headroom for DB and signing.
+const GITHUB_REQUEST_TIMEOUT = Duration.seconds(7);
 const GITHUB_USER_AGENT = "t3code-relay";
 
 const NO_STORE_HEADERS = {
@@ -222,13 +223,21 @@ const verifyGitHubOrgMembership = Effect.fn("relay.oauth.verify_github_org_membe
         Effect.mapError((cause) => new GitHubUpstreamError({ stage: "org-membership", cause })),
       );
       if (membershipResponse.status === 200) {
-        const membership = yield* decodeGitHubOrgMembership(membershipResponse).pipe(Effect.option);
-        if (Option.isSome(membership) && membership.value.state === "active") {
+        const membership = yield* decodeGitHubOrgMembership(membershipResponse).pipe(
+          Effect.mapError(
+            (cause) => new GitHubUpstreamError({ stage: "org-membership-decode", cause }),
+          ),
+        );
+        if (membership.state === "active") {
           return;
         }
       } else if (membershipResponse.status === 401) {
         return yield* new GitHubOrgMembershipDenied();
-      } else if (membershipResponse.status === 429 || membershipResponse.status >= 500) {
+      } else if (
+        membershipResponse.status === 403 ||
+        membershipResponse.status === 429 ||
+        membershipResponse.status >= 500
+      ) {
         return yield* new GitHubUpstreamError({
           stage: "org-membership",
           cause: `GitHub org membership check returned HTTP ${membershipResponse.status}`,
@@ -828,13 +837,33 @@ const handleToken = Effect.gen(function* () {
       );
     }
 
+    const hasConfiguredAllowedOrgs = config.githubOAuth.allowedOrgs.some(
+      (org) => org.trim().length > 0,
+    );
+    if (!hasConfiguredAllowedOrgs) {
+      return oauthErrorResponse(
+        "temporarily_unavailable",
+        "GitHub organization allowlist is not configured.",
+        503,
+      );
+    }
+
     const membershipCheck = yield* verifyGitHubOrgMembership({
       githubAccessToken: inspected.success.githubAccessToken,
       githubOAuth: config.githubOAuth,
     }).pipe(Effect.result);
     if (membershipCheck._tag === "Failure") {
       if (membershipCheck.failure._tag === "GitHubOrgMembershipDenied") {
-        yield* sessions.revokeById(inspected.success.session.id).pipe(Effect.ignore);
+        const revoked = yield* sessions
+          .revokeById(inspected.success.session.id)
+          .pipe(Effect.result);
+        if (revoked._tag === "Failure") {
+          return oauthErrorResponse(
+            "temporarily_unavailable",
+            "Could not revoke OAuth session.",
+            503,
+          );
+        }
         return oauthErrorResponse("invalid_grant", "GitHub organization membership required.");
       }
       return oauthErrorResponse(

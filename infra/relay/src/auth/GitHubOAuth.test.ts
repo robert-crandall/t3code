@@ -406,10 +406,16 @@ describe("GitHubOAuth", () => {
     () =>
       Effect.gen(function* () {
         let orgStatus = 200;
+        let orgRawBody: string | undefined;
         let failUpdate = false;
         const { app } = yield* makeTestApp({
           failUpdate: () => failUpdate,
-          onGitHubRequest: (url) => defaultGitHubMock({ orgStatus })(url),
+          onGitHubRequest: (url) => {
+            if (url.includes("/user/memberships/orgs/") && orgRawBody !== undefined) {
+              return new Response(orgRawBody, { status: orgStatus });
+            }
+            return defaultGitHubMock({ orgStatus })(url);
+          },
         });
 
         // Start a session via Device Flow.
@@ -443,28 +449,37 @@ describe("GitHubOAuth", () => {
           loginRes.json(),
         )) as { refresh_token: string };
 
-        // Transient GitHub 500 -> 503 temporarily_unavailable without revoking the session.
-        orgStatus = 500;
-        const transientRes = yield* Effect.promise(() =>
-          app.handler(
-            new Request("https://relay.crandalls.cloud/v1/auth/token", {
-              method: "POST",
-              headers: { "content-type": "application/x-www-form-urlencoded" },
-              body: new URLSearchParams({
-                grant_type: "refresh_token",
-                client_id: "t3-cli",
-                refresh_token: initialRefresh,
+        // Transient GitHub 500, 403 rate-limit, and malformed 200 JSON all return 503
+        // temporarily_unavailable without revoking the session.
+        for (const scenario of [
+          { status: 500, rawBody: undefined },
+          { status: 403, rawBody: undefined },
+          { status: 200, rawBody: "{not-json" },
+        ]) {
+          orgStatus = scenario.status;
+          orgRawBody = scenario.rawBody;
+          const transientRes = yield* Effect.promise(() =>
+            app.handler(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                  grant_type: "refresh_token",
+                  client_id: "t3-cli",
+                  refresh_token: initialRefresh,
+                }),
               }),
-            }),
-          ),
-        );
-        expect(transientRes.status).toBe(503);
-        expect(yield* Effect.promise(() => transientRes.json())).toMatchObject({
-          error: "temporarily_unavailable",
-        });
+            ),
+          );
+          expect(transientRes.status).toBe(503);
+          expect(yield* Effect.promise(() => transientRes.json())).toMatchObject({
+            error: "temporarily_unavailable",
+          });
+        }
 
         // Once GitHub recovers, the same refresh token still succeeds and rotates.
         orgStatus = 200;
+        orgRawBody = undefined;
         const recoveredRes = yield* Effect.promise(() =>
           app.handler(
             new Request("https://relay.crandalls.cloud/v1/auth/token", {
@@ -499,6 +514,26 @@ describe("GitHubOAuth", () => {
         );
         expect(revokeErrRes.status).toBe(503);
         expect(yield* Effect.promise(() => revokeErrRes.json())).toMatchObject({
+          error: "temporarily_unavailable",
+        });
+
+        // Org denial (404) when revocation persistence fails returns 503 instead of claiming invalid_grant.
+        orgStatus = 404;
+        const deniedPersistErrRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: "t3-cli",
+                refresh_token: rotatedRefresh,
+              }),
+            }),
+          ),
+        );
+        expect(deniedPersistErrRes.status).toBe(503);
+        expect(yield* Effect.promise(() => deniedPersistErrRes.json())).toMatchObject({
           error: "temporarily_unavailable",
         });
         failUpdate = false;

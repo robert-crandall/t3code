@@ -44,8 +44,6 @@ const resolveMigrationConnection = (
   } else if (sslmode === "no-verify") {
     ssl = { rejectUnauthorized: false };
     parsed.searchParams.set("sslmode", "require");
-  } else if (sslmode === "prefer" || sslmode === "allow") {
-    ssl = true;
   }
 
   return {
