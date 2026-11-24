@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "db:generate": "drizzle-kit generate --dialect postgresql --schema ./src/persistence/schema.ts --out ./migrations/postgres",
     "db:migrate": "node scripts/migrate.ts",
     "deploy": "alchemy deploy",
     "push:android:smoke": "node scripts/android-push-smoke.ts",

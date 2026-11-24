@@ -25,6 +25,7 @@ const CLIENT_ID_TOKEN_TYP = "JWT";
 const OAUTH_STATE_TYP = "t3-oauth-state+jwt";
 const OAUTH_CODE_TYP = "t3-oauth-code+jwt";
 const OAUTH_DEVICE_TYP = "t3-oauth-device+jwt";
+const OAUTH_REFRESH_TYP = "t3-oauth-refresh+jwt";
 const LINK_CHALLENGE_KIND = "environment_link_challenge";
 export const RELAY_DPOP_ACCESS_TOKEN_TTL = "30 minutes";
 export const RELAY_CLIENT_ACCESS_TOKEN_TTL = "15 minutes";
@@ -35,6 +36,7 @@ export const RELAY_OAUTH_CODE_TTL = "1 minute";
 export const RELAY_OAUTH_CODE_TTL_SECONDS = 60;
 export const RELAY_OAUTH_DEVICE_MAX_TTL = "20 minutes";
 export const RELAY_OAUTH_DEVICE_MAX_TTL_SECONDS = 20 * 60;
+export const RELAY_OAUTH_REFRESH_MAX_TTL = "90 days";
 
 const LinkChallengeClaims = Schema.Struct({
   kind: Schema.Literal(LINK_CHALLENGE_KIND),
@@ -97,6 +99,7 @@ const OAuthCodeTokenClaims = Schema.Struct({
   sub: Schema.String,
   preferred_username: Schema.String,
   email: Schema.optional(Schema.String),
+  enc_gh: Schema.String,
   client_id: Schema.String,
   redirect_uri: Schema.String,
   code_challenge: Schema.String,
@@ -115,6 +118,18 @@ const OAuthDeviceTokenClaims = Schema.Struct({
   exp: Schema.Int,
 });
 export type OAuthDeviceTokenClaims = typeof OAuthDeviceTokenClaims.Type;
+
+const OAuthRefreshTokenClaims = Schema.Struct({
+  iss: Schema.String,
+  aud: Schema.String,
+  sub: Schema.String,
+  sid: Schema.String,
+  client_id: Schema.String,
+  jti: Schema.String,
+  iat: Schema.Int,
+  exp: Schema.Int,
+});
+export type OAuthRefreshTokenClaims = typeof OAuthRefreshTokenClaims.Type;
 
 const allowedScopesByClientId: Record<
   RelayPublicClientId,
@@ -202,6 +217,7 @@ export class RelayTokens extends Context.Service<
       readonly userId: string;
       readonly githubLogin: string;
       readonly email?: string;
+      readonly encryptedGithubAccessToken: string;
       readonly clientId: string;
       readonly redirectUri: string;
       readonly codeChallenge: string;
@@ -221,6 +237,17 @@ export class RelayTokens extends Context.Service<
     readonly verifyOAuthDeviceToken: (input: {
       readonly token: string;
     }) => Effect.Effect<OAuthDeviceTokenClaims | null>;
+    readonly issueOAuthRefreshToken: (input: {
+      readonly userId: string;
+      readonly sessionId: string;
+      readonly clientId: string;
+      readonly jti: string;
+      readonly issuedAtEpochSeconds: number;
+      readonly expiresAtEpochSeconds: number;
+    }) => Effect.Effect<string, RelayJwtError>;
+    readonly verifyOAuthRefreshToken: (input: {
+      readonly token: string;
+    }) => Effect.Effect<OAuthRefreshTokenClaims | null>;
   }
 >()("t3code-relay/auth/RelayTokens") {}
 
@@ -423,6 +450,7 @@ const make = Effect.gen(function* () {
         sub: input.userId,
         preferred_username: input.githubLogin,
         ...(input.email ? { email: input.email } : {}),
+        enc_gh: input.encryptedGithubAccessToken,
         client_id: input.clientId,
         redirect_uri: input.redirectUri,
         code_challenge: input.codeChallenge,
@@ -477,6 +505,38 @@ const make = Effect.gen(function* () {
       .pipe(Effect.orElseSucceed(() => null)),
   );
 
+  const issueOAuthRefreshToken: RelayTokens["Service"]["issueOAuthRefreshToken"] = Effect.fn(
+    "relay.tokens.issue_oauth_refresh_token",
+  )(function* (input) {
+    return yield* mint.sign({
+      typ: OAUTH_REFRESH_TYP,
+      payload: {
+        iss: issuer,
+        aud: issuer,
+        sub: input.userId,
+        sid: input.sessionId,
+        client_id: input.clientId,
+        jti: input.jti,
+        iat: input.issuedAtEpochSeconds,
+        exp: input.expiresAtEpochSeconds,
+      },
+    });
+  });
+
+  const verifyOAuthRefreshToken: RelayTokens["Service"]["verifyOAuthRefreshToken"] = Effect.fn(
+    "relay.tokens.verify_oauth_refresh_token",
+  )((input) =>
+    mint
+      .verify(OAuthRefreshTokenClaims, {
+        token: input.token,
+        typ: OAUTH_REFRESH_TYP,
+        issuer,
+        audience: issuer,
+        maxTokenAge: RELAY_OAUTH_REFRESH_MAX_TTL,
+      })
+      .pipe(Effect.orElseSucceed(() => null)),
+  );
+
   return RelayTokens.of({
     resolveDpopAccessTokenScopes,
     issueLinkChallenge,
@@ -492,6 +552,8 @@ const make = Effect.gen(function* () {
     verifyOAuthCodeToken,
     issueOAuthDeviceToken,
     verifyOAuthDeviceToken,
+    issueOAuthRefreshToken,
+    verifyOAuthRefreshToken,
   });
 });
 

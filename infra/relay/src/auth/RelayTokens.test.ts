@@ -219,6 +219,7 @@ describe("RelayTokens", () => {
         clientId: "t3-cli",
         redirectUri: "http://127.0.0.1:4321/callback",
         codeChallenge: "challenge-1",
+        encryptedGithubAccessToken: "v1.nonce.cipher",
         jti: "code-jti-1",
         issuedAtEpochSeconds: 100,
         expiresAtEpochSeconds: 160,
@@ -228,6 +229,14 @@ describe("RelayTokens", () => {
         githubDeviceCode: "gh-device-1",
         issuedAtEpochSeconds: 100,
         expiresAtEpochSeconds: 700,
+      });
+      const refreshToken = yield* relayTokens.issueOAuthRefreshToken({
+        userId: "github:42",
+        sessionId: "sess-1",
+        clientId: "t3-cli",
+        jti: "refresh-jti-1",
+        issuedAtEpochSeconds: 100,
+        expiresAtEpochSeconds: 1_000,
       });
 
       yield* TestClock.setTime(150_000);
@@ -245,18 +254,25 @@ describe("RelayTokens", () => {
       expect(yield* relayTokens.verifyOAuthCodeToken({ token: codeToken })).toMatchObject({
         sub: "github:42",
         jti: "code-jti-1",
+        enc_gh: "v1.nonce.cipher",
       });
       expect(yield* relayTokens.verifyOAuthDeviceToken({ token: deviceToken })).toMatchObject({
         github_device_code: "gh-device-1",
       });
+      expect(yield* relayTokens.verifyOAuthRefreshToken({ token: refreshToken })).toMatchObject({
+        sid: "sess-1",
+        client_id: "t3-cli",
+        jti: "refresh-jti-1",
+      });
 
       // Cross-purpose tokens must never pass another verifier.
-      for (const wrongToken of [idToken, stateToken, codeToken, deviceToken]) {
+      for (const wrongToken of [idToken, stateToken, codeToken, deviceToken, refreshToken]) {
         expect(yield* relayTokens.verifyClientAccessToken({ token: wrongToken })).toBeNull();
       }
       expect(yield* relayTokens.verifyOAuthCodeToken({ token: accessToken })).toBeNull();
       expect(yield* relayTokens.verifyOAuthStateToken({ token: codeToken })).toBeNull();
       expect(yield* relayTokens.verifyOAuthDeviceToken({ token: stateToken })).toBeNull();
+      expect(yield* relayTokens.verifyOAuthRefreshToken({ token: accessToken })).toBeNull();
 
       // Expired access token is rejected.
       yield* TestClock.setTime(1_061_000);

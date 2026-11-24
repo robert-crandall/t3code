@@ -1,3 +1,4 @@
+import * as Alchemy from "alchemy";
 import type { PgClient } from "@effect/sql-pg/PgClient";
 import * as Cloudflare from "@alchemy.run/cloudflare";
 import type { EffectPgDatabase } from "drizzle-orm/effect-postgres";
@@ -32,6 +33,7 @@ export class RelayTransactions extends Context.Service<
 }
 
 export const RelayHyperdrive = Effect.gen(function* () {
+  const { stage } = yield* Alchemy.Stack;
   const hyperdriveId = Option.getOrUndefined(
     Option.filter(
       yield* Config.option(Config.String("RELAY_HYPERDRIVE_ID")),
@@ -43,8 +45,9 @@ export const RelayHyperdrive = Effect.gen(function* () {
       hyperdriveId: hyperdriveId.trim(),
     });
   }
+  const defaultName = stage === "prod" ? "t3code-relay" : `t3code-relay-${stage}`;
   const name = (yield* Config.String("RELAY_HYPERDRIVE_NAME").pipe(
-    Config.withDefault("t3code-relay"),
+    Config.withDefault(defaultName),
   )).trim();
   return Cloudflare.Hyperdrive.lookup("RelayHyperdrive", { name });
 });

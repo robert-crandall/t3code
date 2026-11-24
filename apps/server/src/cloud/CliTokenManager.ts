@@ -528,31 +528,69 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const clear = semaphore.withPermits(1)(
-    revokeStoredRefreshToken().pipe(
-      Effect.flatMap(() => secrets.remove(CLOUD_CLI_OAUTH_TOKEN_SECRET)),
-      Effect.mapError((cause) => new CloudCliCredentialRemovalError({ cause })),
-      Effect.provide(services),
-    ),
-  );
-
-  const withCrossProcessRefreshLock = <A, E, R>(
+  const withCrossProcessTokenLock = <A, E, E2, R>(
+    mapLockError: (cause: unknown) => E2,
     run: (lockedCrossProcess: boolean) => Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E | CloudCliCredentialRefreshError, R> => {
+  ): Effect.Effect<A, E | E2, R> => {
     const secretsDirectory = secrets.directory;
     if (typeof secretsDirectory !== "string" || secretsDirectory.length === 0) {
       return run(false);
     }
     const lockTarget = NodePath.join(secretsDirectory, CLOUD_CLI_OAUTH_TOKEN_SECRET);
-    return Effect.acquireUseRelease(
-      Effect.tryPromise({
-        try: (signal) => acquireServiceSelectionLock(lockTarget, { signal }),
-        catch: (cause) => new CloudCliCredentialRefreshError({ cause }),
+    return Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        let acquiredRelease: (() => void) | undefined;
+        let interrupted = false;
+        const release = yield* restore(
+          Effect.tryPromise({
+            try: (signal) =>
+              acquireServiceSelectionLock(lockTarget, { signal }).then((unlock) => {
+                if (signal.aborted || interrupted) {
+                  unlock();
+                  throw new DOMException("The operation was aborted.", "AbortError");
+                }
+                acquiredRelease = unlock;
+                return unlock;
+              }),
+            catch: mapLockError,
+          }),
+        ).pipe(
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true;
+              const unlock = acquiredRelease;
+              acquiredRelease = undefined;
+              unlock?.();
+            }).pipe(Effect.ignoreCause),
+          ),
+        );
+        return yield* restore(run(true)).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              acquiredRelease = undefined;
+              release();
+            }).pipe(Effect.ignoreCause),
+          ),
+        );
       }),
-      () => run(true),
-      (release) => Effect.sync(release).pipe(Effect.ignoreCause),
     );
   };
+
+  const clear = semaphore.withPermits(1)(
+    withCrossProcessTokenLock(
+      (cause) => new CloudCliCredentialRemovalError({ cause }),
+      () =>
+        revokeStoredRefreshToken().pipe(
+          Effect.flatMap(() => secrets.remove(CLOUD_CLI_OAUTH_TOKEN_SECRET)),
+          Effect.mapError((cause) => new CloudCliCredentialRemovalError({ cause })),
+        ),
+    ).pipe(Effect.provide(services)),
+  );
+
+  const withCrossProcessRefreshLock = <A, E, R>(
+    run: (lockedCrossProcess: boolean) => Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | CloudCliCredentialRefreshError, R> =>
+    withCrossProcessTokenLock((cause) => new CloudCliCredentialRefreshError({ cause }), run);
 
   const refresh = Effect.fn("cloud.cli_token.refresh")(function* (token: PersistedToken) {
     const metadata = yield* cloudCliOAuthConfig;

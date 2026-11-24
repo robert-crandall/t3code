@@ -38,7 +38,14 @@ describe("Postgres migrations", () => {
       const applied = yield* Effect.promise(() =>
         pg.query<{ count: string }>("SELECT count(*)::text AS count FROM public.relay_migrations"),
       );
-      expect(Number(applied.rows[0]?.count)).toBeGreaterThanOrEqual(15);
+      expect(Number(applied.rows[0]?.count)).toBeGreaterThanOrEqual(16);
+
+      const oauthTable = yield* Effect.promise(() =>
+        pg.query<{ table_name: string | null }>(
+          "SELECT to_regclass('public.relay_oauth_sessions')::text AS table_name",
+        ),
+      );
+      expect(oauthTable.rows[0]?.table_name).toBe("relay_oauth_sessions");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

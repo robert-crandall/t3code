@@ -4,7 +4,9 @@ import * as Drizzle from "@alchemy.run/drizzle/Postgres";
 import * as Config from "effect/Config";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Aead from "effect/crypto/Aead";
 import * as Digest from "effect/crypto/Digest";
+import * as Kdf from "effect/crypto/Kdf";
 import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Signature from "effect/crypto/Signature";
@@ -76,7 +78,9 @@ import * as HookInbox from "./hooks/HookInbox.ts";
 import * as HookInboxObject from "./hooks/HookInboxObject.ts";
 
 const layerWebcrypto = Layer.mergeAll(
+  Aead.layerWebCrypto,
   Digest.layerWebCrypto,
+  Kdf.layerWebCrypto,
   Mac.layerWebCrypto,
   Signature.layerWebCrypto,
 ).pipe(Layer.provideMerge(SecureRandom.layerWebCrypto));
@@ -161,7 +165,7 @@ export const layer = Api.make(
 
     const githubOAuthClientId = yield* Config.String("GITHUB_OAUTH_CLIENT_ID");
     const githubOAuthClientSecret = yield* Config.Redacted("GITHUB_OAUTH_CLIENT_SECRET");
-    const githubAllowedOrgs = (yield* Config.String("GITHUB_ALLOWED_ORGS"))
+    const githubAllowedOrgs = (yield* Config.String("GITHUB_OAUTH_ALLOWED_ORGS"))
       .split(",")
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);

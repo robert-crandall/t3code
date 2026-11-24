@@ -616,3 +616,93 @@ it.effect(
       assert.lengthOf(revokeRequests, 2);
     }).pipe(provideTestEnv),
 );
+
+it.live(
+  "serializes clear() with a concurrent refresh across separate CliTokenManager instances",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-clear-lock-" });
+        const refreshStarted = yield* Deferred.make<void>();
+        const releaseRefresh = yield* Deferred.make<void>();
+        const revokeTokens: Array<string> = [];
+
+        const httpClient = HttpClient.make((request) =>
+          Effect.gen(function* () {
+            const params = readFormBody(request.body);
+            if (request.url.endsWith("/v1/auth/revoke")) {
+              const token = params.get("token");
+              if (token !== null) {
+                revokeTokens.push(token);
+              }
+              return HttpClientResponse.fromWeb(request, new Response(null, { status: 200 }));
+            }
+            yield* Deferred.succeed(refreshStarted, undefined);
+            yield* Deferred.await(releaseRefresh);
+            return HttpClientResponse.fromWeb(
+              request,
+              new Response(
+                JSON.stringify({
+                  access_token: "access-rotated-before-clear",
+                  refresh_token: "refresh-rotated-before-clear",
+                  expires_in: 3600,
+                  token_type: "bearer",
+                  id_token: idTokenWithEmail,
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              ),
+            );
+          }),
+        );
+
+        const sharedBaseLayer = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          ServerSecretStore.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), tempDir)),
+            Layer.provide(NodeServices.layer),
+            Layer.provide(NodeCrypto.layer),
+          ),
+          Layer.succeed(HttpClient.HttpClient, httpClient),
+          Layer.mock(ExternalLauncher.ExternalLauncher)({
+            launchBrowser: () => Effect.void,
+          }),
+        );
+
+        const secrets = yield* ServerSecretStore.ServerSecretStore.pipe(
+          Effect.provide(sharedBaseLayer),
+        );
+        yield* secrets.set(
+          "cloud-cli-oauth-token",
+          new TextEncoder().encode(
+            JSON.stringify({
+              accessToken: "access-expired",
+              refreshToken: "refresh-initial",
+              expiresAtEpochMs: 1,
+              identity: "theo@example.test",
+            }),
+          ),
+        );
+
+        const managerA = yield* CliTokenManager.CloudCliTokenManager.pipe(
+          Effect.provide(CliTokenManager.layer.pipe(Layer.provide(sharedBaseLayer))),
+        );
+        const managerB = yield* CliTokenManager.CloudCliTokenManager.pipe(
+          Effect.provide(CliTokenManager.layer.pipe(Layer.provide(sharedBaseLayer))),
+        );
+
+        const refreshFiber = yield* Effect.forkChild(managerA.getExisting);
+        yield* Deferred.await(refreshStarted);
+
+        const clearFiber = yield* Effect.forkChild(managerB.clear);
+        yield* Deferred.succeed(releaseRefresh, undefined);
+
+        yield* Fiber.join(refreshFiber);
+        yield* Fiber.join(clearFiber);
+
+        assert.isTrue(Option.isNone(yield* secrets.get("cloud-cli-oauth-token")));
+        assert.deepEqual(revokeTokens, ["refresh-rotated-before-clear"]);
+      }).pipe(Effect.provide(NodeServices.layer), provideTestEnv),
+    ),
+);

@@ -65,4 +65,50 @@ it.layer(NodeServices.layer)("service selection lock", (it) => {
       assert.isFalse(yield* fs.exists(lock));
     }),
   );
+
+  it.effect("rejects immediately when given an already-aborted signal", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-selection-lock-" });
+      const selectionPath = path.join(root, "service-state.json");
+      const lock = `${selectionPath}.selection-lock`;
+
+      const errorMessage = yield* Effect.tryPromise({
+        try: () => acquireServiceSelectionLock(selectionPath, { signal: AbortSignal.abort() }),
+        catch: (cause) => String(cause),
+      }).pipe(Effect.flip);
+      assert.match(errorMessage, /Lock acquisition aborted/);
+      assert.isFalse(yield* fs.exists(lock));
+    }),
+  );
+
+  it.effect("aborts while waiting on a contended lease without disturbing the holder", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-selection-lock-" });
+      const selectionPath = path.join(root, "service-state.json");
+      const lock = `${selectionPath}.selection-lock`;
+
+      const releaseFirst = yield* Effect.promise(() => acquireServiceSelectionLock(selectionPath));
+      // @effect-diagnostics-next-line abortControllerInEffect:off -- Testing standalone AbortSignal cancellation.
+      const controller = new AbortController();
+      // Acquire runs synchronously until awaiting the default retry timer + abort listener.
+      const pendingSecond = acquireServiceSelectionLock(selectionPath, {
+        signal: controller.signal,
+      });
+
+      controller.abort();
+      const errorMessage = yield* Effect.tryPromise({
+        try: () => pendingSecond,
+        catch: (cause) => String(cause),
+      }).pipe(Effect.flip);
+      assert.match(errorMessage, /Lock acquisition aborted/);
+      assert.isTrue(yield* fs.exists(lock));
+
+      releaseFirst();
+      assert.isFalse(yield* fs.exists(lock));
+    }),
+  );
 });

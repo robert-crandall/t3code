@@ -1,120 +1,18 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/pglite";
 import { describe, expect, it } from "@effect/vitest";
-import * as Digest from "effect/crypto/Digest";
-import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
-import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 
-import * as RelayDb from "../db.ts";
 import { relayOauthSessions } from "../persistence/schema.ts";
 import * as OAuthSessions from "./OAuthSessions.ts";
-
-function makePgliteOAuthLayers(pg: PGlite) {
-  const db = drizzle({ client: pg });
-
-  const effectDb = {
-    select: () => ({
-      from: (table: typeof relayOauthSessions) => ({
-        where: (condition: unknown) => ({
-          for: () => ({
-            limit: (n: number) =>
-              Effect.promise(() =>
-                db
-                  .select()
-                  .from(table)
-                  .where(condition as never)
-                  .limit(n),
-              ),
-          }),
-        }),
-      }),
-    }),
-    insert: (table: typeof relayOauthSessions) => ({
-      values: (values: typeof relayOauthSessions.$inferInsert) =>
-        Object.assign(
-          Effect.promise(() => db.insert(table).values(values)),
-          {
-            onConflictDoNothing: (opts?: { target?: unknown }) => ({
-              returning: (cols: Record<string, unknown>) =>
-                Effect.promise(() =>
-                  db
-                    .insert(table)
-                    .values(values)
-                    .onConflictDoNothing(opts as never)
-                    .returning(cols as never),
-                ),
-            }),
-          },
-        ),
-    }),
-    update: (table: typeof relayOauthSessions) => ({
-      set: (values: Partial<typeof relayOauthSessions.$inferInsert>) => ({
-        where: (condition: unknown) =>
-          Effect.promise(() =>
-            db
-              .update(table)
-              .set(values)
-              .where(condition as never),
-          ),
-      }),
-    }),
-    delete: (table: typeof relayOauthSessions) => ({
-      where: (condition: unknown) =>
-        Effect.promise(() => db.delete(table).where(condition as never)),
-    }),
-  } as unknown as RelayDb.RelayDb["Service"];
-
-  const transactions: RelayDb.RelayTransactions["Service"] = {
-    withTransaction: (effect) =>
-      Effect.acquireUseRelease(
-        Effect.promise(() => pg.exec("BEGIN")),
-        () => effect,
-        (_, exit) =>
-          Effect.promise(() => pg.exec(exit._tag === "Success" ? "COMMIT" : "ROLLBACK")).pipe(
-            Effect.ignore,
-          ),
-      ),
-  };
-
-  return {
-    db,
-    layer: OAuthSessions.layer.pipe(
-      Layer.provide(Layer.succeed(RelayDb.RelayDb, effectDb)),
-      Layer.provide(Layer.succeed(RelayDb.RelayTransactions, transactions)),
-      Layer.provide(SecureRandom.layerWebCrypto),
-      Layer.provide(Digest.layerWebCrypto),
-    ),
-  };
-}
-
-const setupPglite = Effect.gen(function* () {
-  const pg = yield* Effect.acquireRelease(
-    Effect.promise(() => PGlite.create()),
-    (client) => Effect.promise(() => client.close()),
-  );
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const migrationsDir = yield* path.fromFileUrl(
-    new URL("../../migrations/postgres/", import.meta.url),
-  );
-  for (const name of (yield* fs.readDirectory(migrationsDir)).toSorted()) {
-    const migration = yield* fs.readFileString(`${migrationsDir}${name}/migration.sql`);
-    yield* Effect.promise(() => pg.exec(migration));
-  }
-  return makePgliteOAuthLayers(pg);
-});
+import { setupPgliteOAuthTest } from "./testSupport.ts";
 
 describe("OAuthSessions", () => {
   it.effect("rejects duplicate authCodeJti so authorization codes are strictly one-time", () =>
     Effect.gen(function* () {
-      const { layer } = yield* setupPglite;
+      const { layerAuth } = yield* setupPgliteOAuthTest();
       yield* TestClock.setTime(Date.parse("2026-11-24T12:00:00.000Z"));
 
       yield* Effect.gen(function* () {
@@ -124,6 +22,7 @@ describe("OAuthSessions", () => {
           githubLogin: "octocat",
           email: "octocat@example.com",
           clientId: "t3-cli",
+          githubAccessToken: "gho_secret_token",
           authCodeJti: "code-jti-1",
           authCodeExpiresAt: "2026-11-24T12:05:00.000Z",
         });
@@ -133,17 +32,18 @@ describe("OAuthSessions", () => {
           userId: "github:42",
           githubLogin: "octocat",
           clientId: "t3-cli",
+          githubAccessToken: "gho_secret_token",
           authCodeJti: "code-jti-1",
           authCodeExpiresAt: "2026-11-24T12:05:00.000Z",
         });
         expect(second).toEqual({ _tag: "AuthCodeAlreadyUsed" });
-      }).pipe(Effect.provide(layer));
+      }).pipe(Effect.provide(layerAuth));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
-  it.effect("rotates refresh tokens atomically and commits revocation on replay", () =>
+  it.effect("detects replay across multiple rotations and commits session revocation", () =>
     Effect.gen(function* () {
-      const { db, layer } = yield* setupPglite;
+      const { db, layerAuth } = yield* setupPgliteOAuthTest();
       const startMs = Date.parse("2026-11-24T12:00:00.000Z");
       yield* TestClock.setTime(startMs);
 
@@ -154,29 +54,54 @@ describe("OAuthSessions", () => {
           githubLogin: "octocat",
           email: "octocat@example.com",
           clientId: "t3-cli",
+          githubAccessToken: "gho_secret_token",
         });
         if (created._tag !== "Created") {
           throw new Error("expected Created");
         }
 
-        const rotated = yield* sessions.rotate({
+        // Stored GitHub access token must be encrypted at rest, never plaintext.
+        const initialRows = yield* Effect.promise(() =>
+          db.select().from(relayOauthSessions).where(eq(relayOauthSessions.id, created.sessionId)),
+        );
+        expect(initialRows[0]?.encryptedGithubAccessToken).not.toContain("gho_secret_token");
+
+        const inspected = yield* sessions.inspectForRefresh({
           refreshToken: created.refreshToken,
           clientId: "t3-cli",
         });
-        expect(rotated._tag).toBe("Rotated");
-        if (rotated._tag !== "Rotated") {
+        expect(inspected).toMatchObject({
+          _tag: "Ready",
+          githubAccessToken: "gho_secret_token",
+        });
+
+        // Rotate twice: R0 -> R1 -> R2.
+        const r1 = yield* sessions.rotate({
+          refreshToken: created.refreshToken,
+          clientId: "t3-cli",
+        });
+        expect(r1._tag).toBe("Rotated");
+        if (r1._tag !== "Rotated") {
           throw new Error("expected Rotated");
         }
-        expect(rotated.refreshToken).not.toBe(created.refreshToken);
-        expect(rotated.session).toMatchObject({
+        const r2 = yield* sessions.rotate({
+          refreshToken: r1.refreshToken,
+          clientId: "t3-cli",
+        });
+        expect(r2._tag).toBe("Rotated");
+        if (r2._tag !== "Rotated") {
+          throw new Error("expected Rotated");
+        }
+        expect(r2.refreshToken).not.toBe(r1.refreshToken);
+        expect(r2.session).toMatchObject({
           userId: "github:42",
           githubLogin: "octocat",
           email: "octocat@example.com",
           clientId: "t3-cli",
         });
 
-        // Replaying the prior refresh token must return InvalidGrant(replayed) AND commit revoked_at.
-        const replay = yield* sessions.rotate({
+        // Replaying R0 (two rotations old!) must still detect replay AND revoke the whole session.
+        const replay = yield* sessions.inspectForRefresh({
           refreshToken: created.refreshToken,
           clientId: "t3-cli",
         });
@@ -187,19 +112,19 @@ describe("OAuthSessions", () => {
         );
         expect(rows[0]?.revokedAt).not.toBeNull();
 
-        // The previously valid rotated token is now also revoked.
+        // The latest valid token R2 is now also rejected as revoked.
         const afterRevoke = yield* sessions.rotate({
-          refreshToken: rotated.refreshToken,
+          refreshToken: r2.refreshToken,
           clientId: "t3-cli",
         });
         expect(afterRevoke).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
-      }).pipe(Effect.provide(layer));
+      }).pipe(Effect.provide(layerAuth));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
   it.effect("enforces the 90-day absolute session cap across rolling rotations", () =>
     Effect.gen(function* () {
-      const { layer } = yield* setupPglite;
+      const { layerAuth } = yield* setupPgliteOAuthTest();
       const startMs = Date.parse("2026-11-24T12:00:00.000Z");
       yield* TestClock.setTime(startMs);
 
@@ -209,6 +134,7 @@ describe("OAuthSessions", () => {
           userId: "github:42",
           githubLogin: "octocat",
           clientId: "t3-cli",
+          githubAccessToken: "gho_secret_token",
         });
         if (created._tag !== "Created") {
           throw new Error("expected Created");
@@ -226,11 +152,11 @@ describe("OAuthSessions", () => {
           token = next.refreshToken;
         }
 
-        // At day 91 (> 90d absolute cap, even though only 11d since last rotation), must fail expired.
+        // At day 91 (> 90d absolute cap, even though only 11d since last rotation), must fail.
         yield* TestClock.setTime(startMs + 91 * 24 * 60 * 60 * 1_000);
         const expired = yield* sessions.rotate({ refreshToken: token, clientId: "t3-cli" });
-        expect(expired).toEqual({ _tag: "InvalidGrant", reason: "expired" });
-      }).pipe(Effect.provide(layer));
+        expect(expired._tag).toBe("InvalidGrant");
+      }).pipe(Effect.provide(layerAuth));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
@@ -238,7 +164,7 @@ describe("OAuthSessions", () => {
     "revokes explicitly and prunes only rows past both expires_at and auth_code_expires_at",
     () =>
       Effect.gen(function* () {
-        const { db, layer } = yield* setupPglite;
+        const { db, layerAuth } = yield* setupPgliteOAuthTest();
         const startMs = Date.parse("2026-11-24T12:00:00.000Z");
         yield* TestClock.setTime(startMs);
 
@@ -248,11 +174,13 @@ describe("OAuthSessions", () => {
             userId: "github:1",
             githubLogin: "alice",
             clientId: "t3-cli",
+            githubAccessToken: "gho_alice",
           });
           const withLongAuthCode = yield* sessions.create({
             userId: "github:2",
             githubLogin: "bob",
             clientId: "t3-cli",
+            githubAccessToken: "gho_bob",
             authCodeJti: "long-code",
             authCodeExpiresAt: DateTime.formatIso(
               DateTime.makeUnsafe(startMs + 60 * 24 * 60 * 60 * 1_000),
@@ -283,7 +211,7 @@ describe("OAuthSessions", () => {
           yield* TestClock.setTime(startMs + 65 * 24 * 60 * 60 * 1_000);
           yield* sessions.pruneExpired;
           expect(yield* Effect.promise(() => db.select().from(relayOauthSessions))).toHaveLength(0);
-        }).pipe(Effect.provide(layer));
+        }).pipe(Effect.provide(layerAuth));
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

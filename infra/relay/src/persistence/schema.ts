@@ -206,12 +206,12 @@ export const relayOauthSessions = pgTable(
   {
     id: varchar("id", { length: 64 }).primaryKey(),
     currentTokenHash: varchar("current_token_hash", { length: 128 }).notNull(),
-    previousTokenHash: varchar("previous_token_hash", { length: 128 }),
     authCodeJti: varchar("auth_code_jti", { length: 128 }),
     authCodeExpiresAt: varchar("auth_code_expires_at", { length: 64 }),
     userId: varchar("user_id", { length: 191 }).notNull(),
     githubLogin: varchar("github_login", { length: 191 }).notNull(),
     email: text("email"),
+    encryptedGithubAccessToken: text("encrypted_github_access_token").notNull(),
     clientId: varchar("client_id", { length: 64 }).notNull(),
     rotatedAt: varchar("rotated_at", { length: 64 }),
     revokedAt: varchar("revoked_at", { length: 64 }),
@@ -222,7 +222,6 @@ export const relayOauthSessions = pgTable(
   },
   (table) => [
     uniqueIndex("idx_relay_oauth_sessions_current_token_hash").on(table.currentTokenHash),
-    uniqueIndex("idx_relay_oauth_sessions_previous_token_hash").on(table.previousTokenHash),
     uniqueIndex("idx_relay_oauth_sessions_auth_code_jti").on(table.authCodeJti),
     index("idx_relay_oauth_sessions_expires_at").on(table.expiresAt),
   ],
