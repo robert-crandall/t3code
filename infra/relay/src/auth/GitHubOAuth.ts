@@ -6,7 +6,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
-import * as Layer from "effect/Layer";
+import type * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
@@ -1024,10 +1024,56 @@ const handleRevoke = Effect.gen(function* () {
   return oauthJsonResponse({ ok: true });
 }).pipe(Effect.withSpan("relay.oauth.revoke"));
 
-export const layerRoutes = Layer.mergeAll(
-  HttpRouter.add("GET", "/v1/auth/authorize", handleAuthorize),
-  HttpRouter.add("GET", "/v1/auth/github/callback", handleGitHubCallback),
-  HttpRouter.add("POST", "/v1/auth/device", handleDeviceAuthorization),
-  HttpRouter.add("POST", "/v1/auth/token", handleToken),
-  HttpRouter.add("POST", "/v1/auth/revoke", handleRevoke),
+export const layerRoutes: Layer.Layer<
+  never,
+  never,
+  | HttpRouter.HttpRouter
+  | RelayConfiguration.RelayConfiguration
+  | RelayTokens.RelayTokens
+  | OAuthSessions.OAuthSessions
+  | HttpClient.HttpClient
+  | SecureRandom.SecureRandom
+  | Digest.Digest
+> = HttpRouter.use(
+  Effect.fnUntraced(function* (router) {
+    const config = yield* RelayConfiguration.RelayConfiguration;
+    const relayTokens = yield* RelayTokens.RelayTokens;
+    const sessions = yield* OAuthSessions.OAuthSessions;
+    const httpClient = yield* HttpClient.HttpClient;
+    const random = yield* SecureRandom.SecureRandom;
+    const digest = yield* Digest.Digest;
+
+    // Bind services at router build time because HttpRouter.toHttpEffect does not forward layer outputs to requests.
+    const bind = (
+      handler: Effect.Effect<
+        HttpServerResponse.HttpServerResponse,
+        never,
+        | HttpServerRequest.HttpServerRequest
+        | RelayConfiguration.RelayConfiguration
+        | RelayTokens.RelayTokens
+        | OAuthSessions.OAuthSessions
+        | HttpClient.HttpClient
+        | SecureRandom.SecureRandom
+        | Digest.Digest
+      >,
+    ): Effect.Effect<
+      HttpServerResponse.HttpServerResponse,
+      never,
+      HttpServerRequest.HttpServerRequest
+    > =>
+      handler.pipe(
+        Effect.provideService(RelayConfiguration.RelayConfiguration, config),
+        Effect.provideService(RelayTokens.RelayTokens, relayTokens),
+        Effect.provideService(OAuthSessions.OAuthSessions, sessions),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+        Effect.provideService(SecureRandom.SecureRandom, random),
+        Effect.provideService(Digest.Digest, digest),
+      );
+
+    yield* router.add("GET", "/v1/auth/authorize", bind(handleAuthorize));
+    yield* router.add("GET", "/v1/auth/github/callback", bind(handleGitHubCallback));
+    yield* router.add("POST", "/v1/auth/device", bind(handleDeviceAuthorization));
+    yield* router.add("POST", "/v1/auth/token", bind(handleToken));
+    yield* router.add("POST", "/v1/auth/revoke", bind(handleRevoke));
+  }),
 );

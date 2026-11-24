@@ -8,6 +8,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Layer from "effect/Layer";
 
 import * as GitHubOAuth from "./GitHubOAuth.ts";
@@ -633,6 +634,85 @@ describe("GitHubOAuth", () => {
           ),
         );
         expect(pollRes.status).toBe(200);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect(
+    "captures runtime services at layer build time when wired through HttpRouter.toHttpEffect",
+    () =>
+      Effect.gen(function* () {
+        const { layerAuth } = yield* setupPgliteOAuthTest();
+        const mockHttpClient = HttpClient.make((request) =>
+          Effect.sync(() => HttpClientResponse.fromWeb(request, defaultGitHubMock()(request.url))),
+        );
+        const httpEffect = yield* HttpRouter.toHttpEffect(
+          GitHubOAuth.layerRoutes.pipe(
+            Layer.provide(layerAuth),
+            Layer.provide(Layer.succeed(HttpClient.HttpClient, mockHttpClient)),
+          ),
+        ).pipe(Effect.provide(HttpServer.layerServices));
+
+        const authorizeResponse = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/authorize"),
+            ),
+          ),
+        );
+        expect(authorizeResponse.status).toBe(400);
+
+        const revokeResponse = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/revoke", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: "",
+              }),
+            ),
+          ),
+        );
+        expect(revokeResponse.status).toBe(200);
+
+        const deviceResponse = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/device", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({ client_id: "t3-cli" }),
+              }),
+            ),
+          ),
+        );
+        expect(deviceResponse.status).toBe(200);
+
+        const callbackResponse = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/github/callback"),
+            ),
+          ),
+        );
+        expect(callbackResponse.status).toBe(400);
+
+        const tokenResponse = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: "",
+              }),
+            ),
+          ),
+        );
+        expect(tokenResponse.status).toBe(400);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

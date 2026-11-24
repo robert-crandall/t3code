@@ -461,7 +461,7 @@ export const layer = Api.make(
         HttpApiBuilder.layer(RelayApi, { openapiPath: "/openapi.json" }).pipe(
           Layer.provide(layerApp),
         ),
-        GitHubOAuth.layerRoutes.pipe(Layer.provideMerge(layerRuntime)),
+        GitHubOAuth.layerRoutes.pipe(Layer.provide(layerRuntime)),
         HttpApiScalar.layer(RelayApi, { path: "/docs" }),
         RelayHttpApi.layerDocsRedirectRoute,
       ).pipe(
