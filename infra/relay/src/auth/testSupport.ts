@@ -52,22 +52,28 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
   }
 
   const db = drizzle({ client: pg });
+  let forUpdateCount = 0;
+  let inTx = false;
+
   const effectDb = {
     select: () => ({
       from: (table: typeof relayOauthSessions) => ({
         where: (condition: unknown) => {
-          const runLimit = (n: number) =>
-            Effect.promise(() =>
-              db
+          const runLimit = (n: number, lockMode?: string) =>
+            Effect.promise(() => {
+              const query = db
                 .select()
                 .from(table)
-                .where(condition as never)
-                .limit(n),
-            );
+                .where(condition as never);
+              return (lockMode ? query.for(lockMode as never) : query).limit(n);
+            });
           return {
-            limit: runLimit,
-            for: () => ({
-              limit: runLimit,
+            limit: (n: number) => runLimit(n),
+            for: (mode: string) => ({
+              limit: (n: number) => {
+                if (mode === "update") forUpdateCount += 1;
+                return runLimit(n, mode);
+              },
             }),
           };
         },
@@ -93,15 +99,25 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
     }),
     update: (table: typeof relayOauthSessions) => ({
       set: (values: Partial<typeof relayOauthSessions.$inferInsert>) => ({
-        where: (condition: unknown) =>
-          options?.failUpdate?.()
-            ? Effect.fail(new InjectedPersistenceError())
-            : Effect.promise(() =>
-                db
-                  .update(table)
-                  .set(values)
-                  .where(condition as never),
-              ),
+        where: (condition: unknown) => {
+          if (options?.failUpdate?.()) {
+            // Inside a transaction, execute the write before failing so tests verify ROLLBACK reverts it.
+            return inTx
+              ? Effect.promise(() =>
+                  db
+                    .update(table)
+                    .set(values)
+                    .where(condition as never),
+                ).pipe(Effect.andThen(Effect.fail(new InjectedPersistenceError())))
+              : Effect.fail(new InjectedPersistenceError());
+          }
+          return Effect.promise(() =>
+            db
+              .update(table)
+              .set(values)
+              .where(condition as never),
+          );
+        },
       }),
     }),
     delete: (table: typeof relayOauthSessions) => ({
@@ -115,11 +131,23 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
     withTransaction: (effect) =>
       txLock.withPermits(1)(
         Effect.acquireUseRelease(
-          Effect.promise(() => pg.exec("BEGIN")),
+          Effect.promise(() => pg.exec("BEGIN")).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                inTx = true;
+              }),
+            ),
+          ),
           () => effect,
           (_, exit) =>
-            Effect.promise(() => pg.exec(exit._tag === "Success" ? "COMMIT" : "ROLLBACK")).pipe(
-              Effect.ignore,
+            Effect.sync(() => {
+              inTx = false;
+            }).pipe(
+              Effect.andThen(
+                Effect.promise(() => pg.exec(exit._tag === "Success" ? "COMMIT" : "ROLLBACK")).pipe(
+                  Effect.ignore,
+                ),
+              ),
             ),
         ),
       ),
@@ -162,5 +190,5 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
     return OAuthSessions.layer.pipe(Layer.provideMerge(layerRelayTokens));
   };
 
-  return { db, layerAuth: makeLayerAuth(), makeLayerAuth };
+  return { db, layerAuth: makeLayerAuth(), makeLayerAuth, getForUpdateCount: () => forUpdateCount };
 });

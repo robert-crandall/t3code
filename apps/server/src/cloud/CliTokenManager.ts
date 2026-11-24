@@ -523,7 +523,9 @@ export const make = Effect.gen(function* () {
     const encoded = yield* secrets.get(CLOUD_CLI_OAUTH_TOKEN_SECRET);
     if (Option.isNone(encoded)) return Option.none<PersistedToken>();
     const decoded = yield* decodePersistedToken(bytesToString(encoded.value));
-    const expectedIssuer = relayIssuerFromEndpoint((yield* cloudCliOAuthConfig).tokenEndpoint);
+    const metadata = yield* cloudCliOAuthConfig.pipe(Effect.option);
+    if (Option.isNone(metadata)) return Option.none<PersistedToken>();
+    const expectedIssuer = relayIssuerFromEndpoint(metadata.value.tokenEndpoint);
     if (decoded.issuer !== expectedIssuer) {
       return Option.none<PersistedToken>();
     }

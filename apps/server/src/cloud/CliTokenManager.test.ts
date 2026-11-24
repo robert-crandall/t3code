@@ -793,5 +793,11 @@ it.effect("ignores stored credentials missing or mismatching the configured rela
     if (Option.isSome(existing)) {
       assert.equal(existing.value.issuer, "https://relay.example.test");
     }
+
+    // With T3CODE_RELAY_URL unset, hasCredential returns false instead of failing with ConfigError.
+    const unconfigured = yield* manager.hasCredential.pipe(
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+    );
+    assert.isFalse(unconfigured);
   }).pipe(provideTestEnv),
 );

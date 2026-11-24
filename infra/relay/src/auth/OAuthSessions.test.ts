@@ -326,7 +326,7 @@ describe("OAuthSessions", () => {
     () =>
       Effect.gen(function* () {
         let failUpdate = false;
-        const { layerAuth } = yield* setupPgliteOAuthTest({
+        const { layerAuth, getForUpdateCount } = yield* setupPgliteOAuthTest({
           failUpdate: () => failUpdate,
         });
 
@@ -379,6 +379,7 @@ describe("OAuthSessions", () => {
         const loser = outcomes.find((entry) => entry._tag === "InvalidGrant");
         expect(winner?._tag).toBe("Rotated");
         expect(loser).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+        expect(getForUpdateCount()).toBeGreaterThanOrEqual(3);
         if (!winner || winner._tag !== "Rotated") return;
 
         // The replay committed revocation, so the winner's new refresh token is also rejected.
