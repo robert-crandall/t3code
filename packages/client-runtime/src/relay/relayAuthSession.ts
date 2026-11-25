@@ -354,13 +354,10 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         return new Error("Sign-in was superseded or signed out.");
       }
       let previousDiskSession: RelayStoredSession | null = null;
-      let previousSessionUnreadable = false;
       try {
         previousDiskSession = await options.store.load();
       } catch {
-        // Explicit sign-in is allowed to replace an unreadable stored session,
-        // but we must not blindly clear storage on rollback if we couldn't back it up.
-        previousSessionUnreadable = true;
+        // Explicit sign-in may replace an unreadable stored session.
       }
       try {
         await options.store.save(nextSession);
@@ -370,7 +367,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (input.signal?.aborted || generation !== attemptGeneration) {
         if (previousDiskSession !== null) {
           await options.store.save(previousDiskSession).catch(() => undefined);
-        } else if (!previousSessionUnreadable) {
+        } else {
           await options.store.clear().catch(() => undefined);
         }
         return new Error(
@@ -469,11 +466,11 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         if (generation !== attemptGeneration) {
           return null;
         }
-        const storedOnDisk = await options.store.load().catch(() => null);
+        const storedOnDisk = await options.store.load().catch(() => undefined);
         if (generation !== attemptGeneration) {
           return null;
         }
-        const latestStored = hasUnsavedCache ? null : matchesRelayOrigin(storedOnDisk);
+        const latestStored = hasUnsavedCache ? null : matchesRelayOrigin(storedOnDisk ?? null);
         // Only clear the session if nobody else rotated or replaced the refresh token while we were in flight.
         if (latestStored !== null && latestStored.refreshToken !== attemptedRefreshToken) {
           cachedSession = latestStored;
@@ -482,7 +479,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         }
         cachedSession = null;
         hasUnsavedCache = false;
-        if (storedOnDisk === null || storedOnDisk.relayOrigin === origin) {
+        if (storedOnDisk === null || storedOnDisk?.relayOrigin === origin) {
           await options.store.clear().catch(() => undefined);
         }
         if (generation === attemptGeneration) {
@@ -535,12 +532,15 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (generation !== signOutGeneration) {
         return;
       }
-      const storedOnDisk = await options.store.load().catch(() => null);
-      previous = cachedSession ?? matchesRelayOrigin(storedOnDisk);
+      const storedOnDisk = await options.store.load().catch((error) => {
+        clearError = error;
+        return undefined;
+      });
+      previous = cachedSession ?? matchesRelayOrigin(storedOnDisk ?? null);
       cachedSession = null;
       hasUnsavedCache = false;
       try {
-        if (storedOnDisk === null || storedOnDisk.relayOrigin === origin) {
+        if (storedOnDisk === null || storedOnDisk?.relayOrigin === origin) {
           await options.store.clear();
         }
       } catch (error) {

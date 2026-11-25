@@ -35,10 +35,10 @@ function ConfiguredSettingsAuthRouteScreen() {
   // Follow the auth store so signing out pops the modal cleanly.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pops the navigator when the cloud auth store reports a sign-out
   useEffect(() => {
-    if (hasBeenSignedIn && isLoaded && !isSignedIn) {
+    if (hasBeenSignedIn && isLoaded && !isSignedIn && !isSigningOut && authError === null) {
       navigation.goBack();
     }
-  }, [hasBeenSignedIn, isLoaded, isSignedIn, navigation]);
+  }, [authError, hasBeenSignedIn, isLoaded, isSignedIn, isSigningOut, navigation]);
 
   const handleSignIn = () => {
     if (isSigningIn) return;
