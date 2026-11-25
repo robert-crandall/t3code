@@ -59,8 +59,8 @@
       "url": "https://github.com/pingdotgg/t3code/pull/32476",
       "title": "fix(provider-acp): retire Copilot tasks when their runtime ends",
       "status": "integrated",
-      "reviewedHeadSha": "06b2502faa8c2c1fea199aae2c80623302c8eac0",
-      "notes": "Scopes Copilot subagent attribution per runtime WeakMap and terminalizes runtime-owned subagents when the Copilot process exits; preserved Copilot 1.0.114+ agentId delta and toolIdentityByCallId routing."
+      "reviewedHeadSha": "5bdcc10f12fd0cea65ebb4c05c19f7da601aff02",
+      "notes": "Scopes Copilot subagent attribution per runtime WeakMap and terminalizes runtime-owned subagents when the Copilot process exits; preserved Copilot 1.0.114+ agentId delta, toolIdentityByCallId routing, and replay sourceRuntime normalization (8734e6e52c)."
     },
     {
       "pr": 24740,
@@ -299,7 +299,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/40921",
       "title": "fix(antigravity): mid-turn 401 OAuth refresh errors resume once automatically",
       "status": "skipped",
-      "reviewedHeadSha": "96acbdfa31b5e4d51e9c33323ace60b9a2df328d",
+      "reviewedHeadSha": "0cebdf07066f79d836b4f1faa6ce315d517130c3",
       "skipReason": "Antigravity-only OAuth refresh handling unrelated to Copilot ACP."
     },
     {
@@ -307,7 +307,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/41337",
       "title": "fix(antigravity): normalize per-turn prompt usage at driver boundary",
       "status": "skipped",
-      "reviewedHeadSha": "3612cd91d1181c3a500c64c7d615c0c988fa0e7f",
+      "reviewedHeadSha": "d22ee7580f5a3a64a42a1c1deb3b8e8edad392c2",
       "skipReason": "Antigravity-only prompt usage normalization unrelated to Copilot ACP."
     },
     {
@@ -355,16 +355,16 @@
       "url": "https://github.com/pingdotgg/t3code/pull/42195",
       "title": "fix(provider-acp): Windows T3_ACP_MCP_CALL fallback calls resolve as T3 tools",
       "status": "skipped",
-      "reviewedHeadSha": "ae3b9e78a4673cf27c5d2a4c208860a8e1e29197",
-      "skipReason": "Windows-only T3_ACP_MCP_CALL PowerShell command-line heuristic (+515 LOC) with failing Check and Test CI workflows and 9 open review findings; fork targets Linux and macOS."
+      "reviewedHeadSha": "18b2c066e67cad28b82333b3b4bf897210b671de",
+      "skipReason": "Windows-only T3_ACP_MCP_CALL PowerShell command-line heuristic (+651/-4); fork targets Linux and macOS."
     },
     {
       "pr": 41698,
       "url": "https://github.com/pingdotgg/t3code/pull/41698",
       "title": "feat(server): rare MCP tools load as packs and stop counting against the tool budget",
       "status": "skipped",
-      "reviewedHeadSha": "e8bdf1ed97d74cc47862728bbfcd26b2bc9b8401",
-      "skipReason": "Conflicting (+505/-59) MCP tool-pack experiment with 10 failing CI checks (Build and Typecheck, Check, Test Server 1-8) that conflicts directly with integrated #37799 (t3_help/t3_call)."
+      "reviewedHeadSha": "4035d072f39c27cab123546c3c2be3be414ed420",
+      "skipReason": "Conflicting (+523/-59) MCP tool-pack experiment that conflicts directly with integrated #37799 (t3_help/t3_call)."
     },
     {
       "pr": 40673,
@@ -405,6 +405,46 @@
       "status": "skipped",
       "reviewedHeadSha": "a7eb0ab3a70f2a996c0df4fcf746897782750916",
       "skipReason": "UI-only Escape-key polish in Add provider search; wait for upstream merge rather than carrying a custom web UI patch."
+    },
+    {
+      "pr": 42623,
+      "url": "https://github.com/pingdotgg/t3code/pull/42623",
+      "title": "fix(server): Antigravity usage limits ignore leftover acp_token.json",
+      "status": "skipped",
+      "reviewedHeadSha": "c6d42936ecedf2d7d246a8edafce79fabf02c210",
+      "skipReason": "Antigravity-only usage limits acp_token.json handling unrelated to Copilot ACP."
+    },
+    {
+      "pr": 42001,
+      "url": "https://github.com/pingdotgg/t3code/pull/42001",
+      "title": "fix(antigravity): keep rejected update_steps from wiping tasks and omit skipped steps",
+      "status": "skipped",
+      "reviewedHeadSha": "4b8cf2bca8bc072dbb697a844a8f8f65de9395b0",
+      "skipReason": "Antigravity-only update_steps task handling unrelated to Copilot ACP."
+    },
+    {
+      "pr": 41693,
+      "url": "https://github.com/pingdotgg/t3code/pull/41693",
+      "title": "fix(server): idle Antigravity sessions no longer kill live swarms or subagents",
+      "status": "skipped",
+      "reviewedHeadSha": "6a3aaa9597426d1353b736f09bc2d2b070811e38",
+      "skipReason": "Large (+1371/-125) Antigravity-only idle swarm/subagent fix unrelated to Copilot ACP."
+    },
+    {
+      "pr": 40043,
+      "url": "https://github.com/pingdotgg/t3code/pull/40043",
+      "title": "fix(acp): release runtimeCallbackPermit while awaiting URL elicitation consent",
+      "status": "skipped",
+      "reviewedHeadSha": "ec7ed4c70b108c26ca8cff453d80b045a912bda6",
+      "skipReason": "Unresolved Major review deadlock on force-new-thread runtime scope replacement while URL elicitation consent is pending (takeover:needs-julius, conflicting with main)."
+    },
+    {
+      "pr": 40559,
+      "url": "https://github.com/pingdotgg/t3code/pull/40559",
+      "title": "fix(acp): keep completed replies visible when background wakes follow in the same run",
+      "status": "skipped",
+      "reviewedHeadSha": "4214ad4f37ed5fcffd5e7fdea24d6e2365539382",
+      "skipReason": "Antigravity held-open multi-wake / replyEndsWithUsageUpdate folding change (+532/-53); Copilot ACP uses separate continuation turns rather than held-open replyEndsWithUsageUpdate wakes."
     }
   ]
 }
