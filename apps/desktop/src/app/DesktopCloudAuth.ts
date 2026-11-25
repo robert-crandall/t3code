@@ -85,7 +85,7 @@ export class DesktopCloudAuth extends Context.Service<
       readonly forceRefresh?: boolean | undefined;
     }) => Effect.Effect<string | null>;
     readonly signIn: Effect.Effect<DesktopCloudAuthState, DesktopCloudAuthError>;
-    readonly signOut: Effect.Effect<DesktopCloudAuthState>;
+    readonly signOut: Effect.Effect<DesktopCloudAuthState, DesktopCloudAuthError>;
   }
 >()("@t3tools/desktop/app/DesktopCloudAuth") {}
 
@@ -318,23 +318,35 @@ function makeEncryptedTokenStore(input: {
           const exists = yield* fileSystem.exists(sessionFilePath);
           if (!exists) return null;
           if (!(yield* isStrongEncryptionAvailable(safeStorage))) {
-            yield* Effect.logWarning(
-              "OS secret storage is unavailable or using basic_text; cannot decrypt saved cloud auth session safely.",
-            );
-            return null;
+            return yield* new DesktopCloudAuthError({
+              message:
+                "OS secret storage is unavailable or using basic_text; cannot decrypt saved cloud auth session safely.",
+            });
           }
           const raw = yield* fileSystem.readFileString(sessionFilePath);
-          const doc = yield* decodeEncryptedSessionDocumentJson(raw);
+          const doc = yield* decodeEncryptedSessionDocumentJson(raw).pipe(
+            Effect.catchTags({
+              SchemaError: (error) =>
+                Effect.logWarning("Ignoring malformed persisted desktop cloud auth session file.", {
+                  error,
+                }).pipe(Effect.as(null)),
+            }),
+          );
+          if (doc === null) return null;
           const bytes = new Uint8Array(Buffer.from(doc.encryptedSession, "base64"));
           const plaintext = yield* safeStorage.decryptString(bytes);
-          return yield* decodeStoredSessionJson(plaintext);
-        }).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Could not load persisted desktop cloud auth session.", {
-              error,
-            }).pipe(Effect.as(null)),
-          ),
-        ),
+          return yield* decodeStoredSessionJson(plaintext).pipe(
+            Effect.catchTags({
+              SchemaError: (error) =>
+                Effect.logWarning(
+                  "Ignoring malformed decrypted desktop cloud auth session payload.",
+                  {
+                    error,
+                  },
+                ).pipe(Effect.as(null)),
+            }),
+          );
+        }),
       ),
 
     save: (session: RelayStoredSession) =>
@@ -428,25 +440,37 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
         broadcastState({ status: "signedOut", identity: null });
         return;
       }
-      const store = makeEncryptedTokenStore({
-        fileSystem,
-        path,
-        safeStorage,
-        sessionFilePath,
-        runEffect,
-      });
-      const created = createRelayAuthSession({
-        relayUrl,
-        clientId: "t3-desktop",
-        store,
-        ...(options.fetch ? { fetch: options.fetch } : {}),
-      });
-      session = created;
-      unsubscribeSession = created.subscribe((snapshot) => {
-        broadcastState(snapshot);
-      });
-      const initialized = await created.initialize();
-      broadcastState(initialized);
+      if (session === null) {
+        const store = makeEncryptedTokenStore({
+          fileSystem,
+          path,
+          safeStorage,
+          sessionFilePath,
+          runEffect,
+        });
+        const created = createRelayAuthSession({
+          relayUrl,
+          clientId: "t3-desktop",
+          store,
+          ...(options.fetch ? { fetch: options.fetch } : {}),
+        });
+        session = created;
+        unsubscribeSession = created.subscribe((snapshot) => {
+          broadcastState(snapshot);
+        });
+      }
+      try {
+        const initialized = await session.initialize();
+        broadcastState(initialized);
+      } catch (error) {
+        startPromise = null;
+        await runEffect(
+          Effect.logWarning(
+            "Could not initialize persisted desktop cloud auth session; keeping loading state for retry.",
+            { error },
+          ),
+        );
+      }
     })();
     await startPromise;
   };
@@ -510,6 +534,7 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
             code,
             redirectUri,
             codeVerifier,
+            signal: abortController.signal,
           });
           void runEffect(
             Effect.gen(function* () {
@@ -532,23 +557,21 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
         }),
     }).pipe(Effect.withSpan("desktop.cloudAuth.signIn")),
 
-    signOut: Effect.promise(async () => {
-      abortActiveSignIn();
-      await ensureStarted();
-      if (session !== null) {
-        try {
+    signOut: Effect.tryPromise({
+      try: async () => {
+        abortActiveSignIn();
+        await ensureStarted();
+        if (session !== null) {
           await session.signOut();
-        } catch (error) {
-          await runEffect(
-            Effect.logWarning("Could not clear persisted desktop cloud auth session on sign-out.", {
-              error,
-            }),
-          );
+          return session.getSnapshot();
         }
-        return session.getSnapshot();
-      }
-      broadcastState({ status: "signedOut", identity: null });
-      return currentState;
+        broadcastState({ status: "signedOut", identity: null });
+        return currentState;
+      },
+      catch: (error) =>
+        new DesktopCloudAuthError({
+          message: error instanceof Error ? error.message : String(error),
+        }),
     }).pipe(Effect.withSpan("desktop.cloudAuth.signOut")),
   });
 });

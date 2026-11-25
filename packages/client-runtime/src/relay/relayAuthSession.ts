@@ -41,6 +41,7 @@ export interface RelayAuthorizationCodeExchangeInput {
   readonly code: string;
   readonly redirectUri: string;
   readonly codeVerifier: string;
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface RelayAuthSession {
@@ -64,6 +65,7 @@ export interface RelayAccessTokenClaims {
 }
 
 const DEFAULT_REFRESH_MARGIN_MS = 60_000;
+const REVOKE_REQUEST_TIMEOUT_MS = 5_000;
 const FALLBACK_ACCESS_TOKEN_TTL_MS = 15 * 60_000;
 
 /**
@@ -268,6 +270,9 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
   const exchangeAuthorizationCode = async (
     input: RelayAuthorizationCodeExchangeInput,
   ): Promise<RelayAuthIdentity> => {
+    if (input.signal?.aborted) {
+      throw new Error("Sign-in was canceled.");
+    }
     const attemptGeneration = generation;
     const response = await fetchImpl(`${origin}/v1/auth/token`, {
       method: "POST",
@@ -282,6 +287,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         redirect_uri: input.redirectUri,
         code_verifier: input.codeVerifier,
       }).toString(),
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     const body = await response.json().catch(() => null);
     if (!response.ok) {
@@ -296,11 +302,14 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
     const parsed = parseTokenResponse(body);
     const nextSession = buildStoredSession(parsed, now());
     return withStorageLock(async () => {
+      if (input.signal?.aborted) {
+        throw new Error("Sign-in was canceled.");
+      }
       if (generation !== attemptGeneration) {
         throw new Error("Sign-in was superseded or signed out.");
       }
       await options.store.save(nextSession);
-      if (generation !== attemptGeneration) {
+      if (input.signal?.aborted || generation !== attemptGeneration) {
         throw new Error("Sign-in was superseded or signed out.");
       }
       generation += 1;
@@ -359,7 +368,12 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         if (generation !== attemptGeneration) {
           return null;
         }
-        await options.store.save(nextSession);
+        try {
+          await options.store.save(nextSession);
+        } catch {
+          // Retain rotated credentials in memory even if durable persistence fails so a later
+          // refresh does not replay the superseded refresh token and revoke the session.
+        }
         if (generation !== attemptGeneration) {
           return null;
         }
@@ -415,11 +429,14 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
     if (refreshPromise !== null) {
       return refreshPromise;
     }
-    const pending = refresh(forceRefresh).finally(() => {
-      if (refreshPromise === pending) {
-        refreshPromise = null;
-      }
-    });
+    const refreshGeneration = generation;
+    const pending = refresh(forceRefresh)
+      .then((token) => (generation === refreshGeneration ? token : null))
+      .finally(() => {
+        if (refreshPromise === pending) {
+          refreshPromise = null;
+        }
+      });
     refreshPromise = pending;
     return pending;
   };
@@ -443,7 +460,15 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       }
     });
 
+    if (generation === signOutGeneration) {
+      setSnapshot({ status: "signedOut", identity: null });
+    }
+
     if (previous !== null && (previous as RelayStoredSession).refreshToken) {
+      const signal =
+        typeof AbortSignal.timeout === "function"
+          ? AbortSignal.timeout(REVOKE_REQUEST_TIMEOUT_MS)
+          : undefined;
       await fetchImpl(`${origin}/v1/auth/revoke`, {
         method: "POST",
         headers: {
@@ -453,14 +478,12 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
           client_id: options.clientId,
           token: (previous as RelayStoredSession).refreshToken,
         }).toString(),
+        ...(signal ? { signal } : {}),
       }).catch(() => undefined);
     }
 
     if (clearError !== null) {
       throw clearError;
-    }
-    if (generation === signOutGeneration) {
-      setSnapshot({ status: "signedOut", identity: null });
     }
   };
 

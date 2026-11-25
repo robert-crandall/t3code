@@ -6,12 +6,14 @@ import { useCloudAuth } from "../../cloud/managedAuth";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Dialog, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "../ui/dialog";
+import { toastManager } from "../ui/toast";
 import { MobileClientsUserProfilePage } from "./MobileClientsUserProfilePage";
 import { T3ChatUserProfilePage } from "./T3ChatUserProfilePage";
 import { T3ConnectUserProfilePage } from "./T3ConnectUserProfilePage";
 
 function AccountOverviewPage({ onSignedOut }: { readonly onSignedOut: () => void }) {
   const { identity, signOut } = useCloudAuth();
+  const gt = useGT();
   const [signingOut, setSigningOut] = useState(false);
 
   const handleSignOut = () => {
@@ -22,7 +24,13 @@ function AccountOverviewPage({ onSignedOut }: { readonly onSignedOut: () => void
         () => {
           onSignedOut();
         },
-        () => undefined,
+        (error: unknown) => {
+          toastManager.add({
+            type: "error",
+            title: gt("Sign-out did not finish cleanly"),
+            description: error instanceof Error ? error.message : String(error),
+          });
+        },
       )
       .finally(() => {
         setSigningOut(false);

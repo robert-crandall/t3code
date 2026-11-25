@@ -408,6 +408,95 @@ describe("relayAuthSession", () => {
 
     failClear = true;
     await expect(session.signOut()).rejects.toThrow("keychain locked");
+    expect(session.getSnapshot()).toEqual({ status: "signedOut", identity: null });
     expect(revokedTokens).toEqual(["rt_2"]);
+  });
+
+  it("keeps loading state on transient store.load failure and hydrates on retry", async () => {
+    const currentTime = 1_000_000_000;
+    const access = makeFakeJwt({
+      sub: "github:42",
+      preferred_username: "robert-crandall",
+      exp: Math.floor((currentTime + 900_000) / 1_000),
+    });
+    let attempts = 0;
+    let cleared = false;
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-mobile",
+      store: {
+        load: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error("keychain temporarily locked");
+          return {
+            accessToken: access,
+            refreshToken: "rt_1",
+            expiresAtMs: currentTime + 900_000,
+            identity: { userId: "github:42", login: "robert-crandall", email: null },
+          };
+        },
+        save: async () => undefined,
+        clear: async () => {
+          cleared = true;
+        },
+      },
+      now: () => currentTime,
+      fetch: async () => new Response(null, { status: 204 }),
+    });
+
+    const snapshots: string[] = [];
+    session.subscribe((next) => {
+      snapshots.push(next.status);
+    });
+
+    await expect(session.initialize()).rejects.toThrow("keychain temporarily locked");
+    expect(session.getSnapshot()).toEqual({ status: "loading", identity: null });
+    expect(snapshots).toEqual([]);
+    expect(cleared).toBe(false);
+
+    const hydrated = await session.initialize();
+    expect(hydrated).toEqual({
+      status: "signedIn",
+      identity: { userId: "github:42", login: "robert-crandall", email: null },
+    });
+    expect(snapshots).toEqual(["signedIn"]);
+  });
+
+  it("never returns a stale access token from a 5xx refresh fallback after signOut", async () => {
+    const currentTime = 1_000_000_000;
+    const nearExpiryAccess = makeFakeJwt({
+      sub: "github:42",
+      preferred_username: "robert-crandall",
+      exp: Math.floor((currentTime + 30_000) / 1_000),
+    });
+    const refreshStarted = Promise.withResolvers<void>();
+    const releaseRefresh = Promise.withResolvers<void>();
+    const { store } = makeMemoryStore({
+      accessToken: nearExpiryAccess,
+      refreshToken: "rt_1",
+      expiresAtMs: currentTime + 30_000,
+      identity: { userId: "github:42", login: "robert-crandall", email: null },
+    });
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-desktop",
+      store,
+      now: () => currentTime,
+      fetch: async (input) => {
+        if (String(input).endsWith("/v1/auth/token")) {
+          refreshStarted.resolve();
+          await releaseRefresh.promise;
+          return new Response("upstream error", { status: 503 });
+        }
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    await session.initialize();
+    const pendingToken = session.getAccessToken();
+    await refreshStarted.promise;
+    await session.signOut();
+    releaseRefresh.resolve();
+    expect(await pendingToken).toBeNull();
   });
 });
