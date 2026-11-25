@@ -323,6 +323,9 @@ permissions:
 publicHoistPattern:
   - "@cursor/sdk-*"
 
+# Wait 7 days (10,080 minutes) after release before resolving new package versions.
+minimumReleaseAge: 10080
+
 minimumReleaseAgeExclude:
   - "@legendapp/list@3.7.3"
   - "@effect/tsgo-darwin-arm64@0.67.1"
