@@ -353,13 +353,14 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (generation !== attemptGeneration) {
         return new Error("Sign-in was superseded or signed out.");
       }
-      let previousDiskSession: RelayStoredSession | null;
+      let previousDiskSession: RelayStoredSession | null = null;
+      let previousSessionUnreadable = false;
       try {
         previousDiskSession = await options.store.load();
-      } catch (error) {
-        return error instanceof Error
-          ? error
-          : new Error("Could not read existing relay session before saving.");
+      } catch {
+        // Explicit sign-in is allowed to replace an unreadable stored session,
+        // but we must not blindly clear storage on rollback if we couldn't back it up.
+        previousSessionUnreadable = true;
       }
       try {
         await options.store.save(nextSession);
@@ -369,7 +370,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (input.signal?.aborted || generation !== attemptGeneration) {
         if (previousDiskSession !== null) {
           await options.store.save(previousDiskSession).catch(() => undefined);
-        } else {
+        } else if (!previousSessionUnreadable) {
           await options.store.clear().catch(() => undefined);
         }
         return new Error(

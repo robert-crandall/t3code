@@ -488,19 +488,34 @@ describe("DesktopCloudAuth", () => {
           reveal: () => Effect.void,
         } as unknown as ElectronWindow.ElectronWindow["Service"];
         let decryptAttempts = 0;
-        const alwaysFailSafeStorage = ElectronSafeStorage.ElectronSafeStorage.of({
+        let keychainLocked = true;
+        let openedExternalCount = 0;
+        const unlockableSafeStorage = ElectronSafeStorage.ElectronSafeStorage.of({
           isEncryptionAvailable: Effect.succeed(true),
           selectedStorageBackend: Effect.succeedNone,
           encryptString: (plaintext) =>
             Effect.succeed(new Uint8Array(Buffer.from(`enc:${plaintext}`, "utf8"))),
-          decryptString: () => {
+          decryptString: (encrypted) => {
             decryptAttempts += 1;
-            return Effect.fail(
-              new ElectronSafeStorage.ElectronSafeStorageDecryptError({
-                cause: new Error("keychain locked"),
-              }),
-            );
+            if (keychainLocked) {
+              return Effect.fail(
+                new ElectronSafeStorage.ElectronSafeStorageDecryptError({
+                  cause: new Error("keychain locked"),
+                }),
+              );
+            }
+            const text = Buffer.from(encrypted).toString("utf8");
+            return Effect.succeed(text.slice(4));
           },
+        });
+        const countingShell = ElectronShell.ElectronShell.of({
+          openExternal: () =>
+            Effect.sync(() => {
+              openedExternalCount += 1;
+              return true;
+            }),
+          openSystemSettings: () => Effect.succeed(false),
+          copyText: () => Effect.void,
         });
 
         const fallbackLayer = Layer.effect(
@@ -517,8 +532,8 @@ describe("DesktopCloudAuth", () => {
                 stateDir,
               } as DesktopEnvironment.DesktopEnvironment["Service"]),
               Layer.succeed(HostProcess.Environment, {}),
-              Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, alwaysFailSafeStorage),
-              Layer.succeed(ElectronShell.ElectronShell, shell),
+              Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, unlockableSafeStorage),
+              Layer.succeed(ElectronShell.ElectronShell, countingShell),
               Layer.succeed(ElectronWindow.ElectronWindow, fallbackWindow),
             ),
           ),
@@ -534,6 +549,15 @@ describe("DesktopCloudAuth", () => {
           assert.isNull(yield* auth.getAccessToken());
           assert.strictEqual(decryptAttempts, 2);
           assert.isTrue(yield* fileSystem.exists(sessionPath));
+
+          // Once the keychain unlocks, explicit signIn recovers the persisted session without opening OAuth.
+          keychainLocked = false;
+          const recovered = yield* auth.signIn;
+          assert.deepStrictEqual(recovered, {
+            status: "signedIn",
+            identity: { userId: "gh_42", login: "robert-crandall", email: "robert@example.com" },
+          });
+          assert.strictEqual(openedExternalCount, 0);
         }).pipe(Effect.scoped, Effect.provide(fallbackLayer));
       }).pipe(Effect.provide(NodeServices.layer)),
   );

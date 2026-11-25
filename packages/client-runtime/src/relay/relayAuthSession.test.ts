@@ -699,7 +699,7 @@ describe("relayAuthSession", () => {
     expect(revokedTokens).toEqual(["rt_aborted"]);
   });
 
-  it("revokes newly minted refresh tokens without clearing storage when store.load or store.save fails during code exchange", async () => {
+  it("replaces an unreadable stored session on sign-in, and revokes minted tokens without clearing when store.save fails", async () => {
     const currentTime = 1_000_000_000;
     const newAccess = makeFakeJwt({
       sub: "github:7",
@@ -708,8 +708,8 @@ describe("relayAuthSession", () => {
     });
     const revokedTokens: string[] = [];
     let cleared = false;
-    let saved = false;
-    let mode: "failLoad" | "failSave" = "failLoad";
+    const savedSessions: RelayStoredSession[] = [];
+    let failSave = true;
     let mintCounter = 0;
 
     const session = createRelayAuthSession({
@@ -717,16 +717,13 @@ describe("relayAuthSession", () => {
       clientId: "t3-desktop",
       store: {
         load: async () => {
-          if (mode === "failLoad") {
-            throw new Error("keychain read failed");
-          }
-          return null;
+          throw new Error("keychain read failed");
         },
-        save: async () => {
-          if (mode === "failSave") {
+        save: async (next) => {
+          if (failSave) {
             throw new Error("keychain write failed");
           }
-          saved = true;
+          savedSessions.push(next);
         },
         clear: async () => {
           cleared = true;
@@ -754,25 +751,28 @@ describe("relayAuthSession", () => {
       },
     });
 
+    // When both load and save fail, sign-in revokes the minted token and never clears storage.
     await expect(
       session.exchangeAuthorizationCode({
         code: "code_1",
         redirectUri: "http://127.0.0.1:43210/callback",
         codeVerifier: "verifier_1",
       }),
-    ).rejects.toThrow("keychain read failed");
-    expect(saved).toBe(false);
-    expect(cleared).toBe(false);
-
-    mode = "failSave";
-    await expect(
-      session.exchangeAuthorizationCode({
-        code: "code_2",
-        redirectUri: "http://127.0.0.1:43210/callback",
-        codeVerifier: "verifier_2",
-      }),
     ).rejects.toThrow("keychain write failed");
+    expect(savedSessions).toEqual([]);
     expect(cleared).toBe(false);
-    expect(revokedTokens).toEqual(["rt_minted_1", "rt_minted_2"]);
+    expect(revokedTokens).toEqual(["rt_minted_1"]);
+
+    // When old storage is unreadable (e.g. reset keychain item) but save succeeds, explicit sign-in recovers.
+    failSave = false;
+    const identity = await session.exchangeAuthorizationCode({
+      code: "code_2",
+      redirectUri: "http://127.0.0.1:43210/callback",
+      codeVerifier: "verifier_2",
+    });
+    expect(identity).toEqual({ userId: "github:7", login: "octocat", email: null });
+    expect(savedSessions.map((entry) => entry.refreshToken)).toEqual(["rt_minted_2"]);
+    expect(cleared).toBe(false);
+    expect(revokedTokens).toEqual(["rt_minted_1"]);
   });
 });

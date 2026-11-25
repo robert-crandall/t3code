@@ -116,7 +116,7 @@ function createDesktopCloudAuthAccountSource(
         },
         () => {
           if (!receivedChange) {
-            emit(SIGNED_OUT_STATE);
+            emit({ status: "unavailable", identity: null });
           }
         },
       );

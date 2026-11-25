@@ -520,14 +520,10 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
       }
     })();
 
-    let pending: Promise<void>;
-    pending = run.finally(() => {
-      if (inFlightStart === pending) {
-        inFlightStart = null;
-      }
+    inFlightStart = run.finally(() => {
+      inFlightStart = null;
     });
-    inFlightStart = pending;
-    return pending;
+    return inFlightStart;
   };
 
   return DesktopCloudAuth.of({
@@ -566,6 +562,16 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
           throw new Error(
             "OS keychain encryption is unavailable; cannot sign in to T3 Connect safely.",
           );
+        }
+
+        // If startup failed because the keychain was locked, retry loading the persisted
+        // session once on explicit sign-in before opening the browser OAuth flow.
+        if (currentState.status === "unavailable") {
+          const recovered = await session.initialize().catch(() => null);
+          if (recovered?.status === "signedIn") {
+            broadcastState(recovered);
+            return recovered;
+          }
         }
 
         // Cancel any abandoned sign-in attempt before opening a fresh loopback listener.
@@ -611,6 +617,9 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
         } finally {
           if (activeSignInAbort === abortController) {
             activeSignInAbort = null;
+          }
+          if (!disposed && currentState.status === "loading") {
+            void ensureStarted();
           }
         }
       },
