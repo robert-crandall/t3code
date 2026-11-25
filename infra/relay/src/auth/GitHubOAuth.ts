@@ -24,6 +24,15 @@ import * as OAuthSessions from "./OAuthSessions.ts";
 import * as RelayTokens from "./RelayTokens.ts";
 
 export const CLI_OAUTH_CLIENT_ID = "t3-cli";
+export const DESKTOP_OAUTH_CLIENT_ID = "t3-desktop";
+export const MOBILE_OAUTH_CLIENT_ID = "t3-mobile";
+const SUPPORTED_OAUTH_CLIENT_IDS = new Set<string>([
+  CLI_OAUTH_CLIENT_ID,
+  DESKTOP_OAUTH_CLIENT_ID,
+  MOBILE_OAUTH_CLIENT_ID,
+]);
+const ALLOWED_MOBILE_REDIRECT_URI_PATTERN =
+  /^(t3code|t3code-dev|t3code-preview|t3code-private):\/\/oauth\/callback$/;
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 const OAUTH_NONCE_COOKIE = "__Host-t3_oauth_nonce";
 const DEFAULT_GITHUB_OAUTH_BASE_URL = "https://github.com";
@@ -84,8 +93,15 @@ function constantTimeEqual(left: string, right: string): boolean {
   return Mac.timingSafeEqual(textEncoder.encode(left), textEncoder.encode(right));
 }
 
+export function isSupportedOAuthClientId(clientId: string): boolean {
+  return SUPPORTED_OAUTH_CLIENT_IDS.has(clientId);
+}
+
 export function isAllowedClientRedirectUri(clientId: string, redirectUri: string): boolean {
-  if (clientId !== CLI_OAUTH_CLIENT_ID) {
+  if (clientId === MOBILE_OAUTH_CLIENT_ID) {
+    return ALLOWED_MOBILE_REDIRECT_URI_PATTERN.test(redirectUri);
+  }
+  if (clientId !== CLI_OAUTH_CLIENT_ID && clientId !== DESKTOP_OAUTH_CLIENT_ID) {
     return false;
   }
   let parsed: URL;
@@ -426,14 +442,11 @@ const handleAuthorize = Effect.gen(function* () {
   const codeChallengeMethod = search.get("code_challenge_method") ?? "";
   const clientState = search.get("state") ?? "";
 
-  if (clientId !== CLI_OAUTH_CLIENT_ID) {
+  if (!isSupportedOAuthClientId(clientId)) {
     return oauthErrorResponse("invalid_client", "Unsupported OAuth client_id.");
   }
   if (!isAllowedClientRedirectUri(clientId, redirectUri)) {
-    return oauthErrorResponse(
-      "invalid_request",
-      "redirect_uri must be a loopback http://127.0.0.1:<port>/callback URL.",
-    );
+    return oauthErrorResponse("invalid_request", "redirect_uri is not allowed for this client_id.");
   }
   if (responseType !== "code") {
     return redirectResponse(
@@ -737,7 +750,7 @@ const handleToken = Effect.gen(function* () {
   const grantType = params.get("grant_type") ?? "";
   const clientId = params.get("client_id") ?? "";
 
-  if (clientId !== CLI_OAUTH_CLIENT_ID) {
+  if (!isSupportedOAuthClientId(clientId)) {
     return oauthErrorResponse("invalid_client", "Unsupported OAuth client_id.");
   }
 
@@ -803,6 +816,9 @@ const handleToken = Effect.gen(function* () {
   }
 
   if (grantType === DEVICE_CODE_GRANT_TYPE) {
+    if (clientId !== CLI_OAUTH_CLIENT_ID) {
+      return oauthErrorResponse("unauthorized_client", "Device flow is only enabled for t3-cli.");
+    }
     const wrappedDeviceCode = params.get("device_code") ?? "";
     if (!wrappedDeviceCode) {
       return oauthErrorResponse("invalid_request", "device_code is required.");

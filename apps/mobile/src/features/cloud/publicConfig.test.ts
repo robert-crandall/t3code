@@ -14,16 +14,28 @@ describe("resolveCloudPublicConfig", () => {
   it("rejects an insecure relay URL", () => {
     expect(
       resolveCloudPublicConfig({
-        clerk: { publishableKey: "pk_test_example", jwtTemplate: "t3-relay" },
         relay: { url: "http://relay.example.test" },
       }),
     ).toEqual({
-      clerk: {
-        publishableKey: "pk_test_example",
-        jwtTemplate: "t3-relay",
-      },
       relay: {
         url: null,
+      },
+      observability: {
+        tracesUrl: null,
+        tracesDataset: null,
+        tracesToken: null,
+      },
+    });
+  });
+
+  it("accepts a secure HTTPS relay URL", () => {
+    expect(
+      resolveCloudPublicConfig({
+        relay: { url: "https://relay.example.test/" },
+      }),
+    ).toEqual({
+      relay: {
+        url: "https://relay.example.test",
       },
       observability: {
         tracesUrl: null,

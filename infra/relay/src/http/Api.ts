@@ -1069,6 +1069,13 @@ export const layerTokenApi = HttpApiBuilder.group(
         if (!verified) {
           return yield* relayAuthInvalidError("invalid_bearer");
         }
+        const subjectClientAllowed =
+          args.payload.client_id === "t3-mobile"
+            ? verified.client_id === "t3-mobile"
+            : verified.client_id === "t3-web" || verified.client_id === "t3-desktop";
+        if (!subjectClientAllowed) {
+          return yield* new HttpApiError.Unauthorized({});
+        }
         const proofKeyThumbprint = yield* requireDpopProof().pipe(
           Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs),
         );

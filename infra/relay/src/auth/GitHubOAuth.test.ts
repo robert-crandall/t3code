@@ -715,4 +715,125 @@ describe("GitHubOAuth", () => {
         expect(tokenResponse.status).toBe(400);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
+
+  it.live(
+    "supports t3-desktop loopback PKCE and t3-mobile custom-scheme PKCE while restricting device flow to t3-cli",
+    () =>
+      Effect.gen(function* () {
+        expect(
+          GitHubOAuth.isAllowedClientRedirectUri("t3-desktop", "http://127.0.0.1:43123/callback"),
+        ).toBe(true);
+        expect(
+          GitHubOAuth.isAllowedClientRedirectUri("t3-desktop", "t3code-private://oauth/callback"),
+        ).toBe(false);
+        expect(
+          GitHubOAuth.isAllowedClientRedirectUri("t3-mobile", "t3code-private://oauth/callback"),
+        ).toBe(true);
+        expect(
+          GitHubOAuth.isAllowedClientRedirectUri("t3-mobile", "t3code-dev://oauth/callback"),
+        ).toBe(true);
+        expect(
+          GitHubOAuth.isAllowedClientRedirectUri(
+            "t3-mobile",
+            "t3code-private://oauth/callback?x=1",
+          ),
+        ).toBe(false);
+        expect(
+          GitHubOAuth.isAllowedClientRedirectUri("t3-mobile", "http://127.0.0.1:43123/callback"),
+        ).toBe(false);
+
+        const { app, layerAuth } = yield* makeTestApp({ onGitHubRequest: defaultGitHubMock() });
+
+        // Device endpoints stay restricted to t3-cli.
+        for (const clientId of ["t3-desktop", "t3-mobile"]) {
+          const deviceRes = yield* Effect.promise(() =>
+            app.handler(
+              new Request("https://relay.crandalls.cloud/v1/auth/device", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({ client_id: clientId }),
+              }),
+            ),
+          );
+          expect(deviceRes.status).toBe(400);
+          expect(yield* Effect.promise(() => deviceRes.json())).toMatchObject({
+            error: "invalid_client",
+          });
+
+          const deviceTokenRes = yield* Effect.promise(() =>
+            app.handler(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                  grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+                  client_id: clientId,
+                  device_code: "unused",
+                }),
+              }),
+            ),
+          );
+          expect(deviceTokenRes.status).toBe(400);
+          expect(yield* Effect.promise(() => deviceTokenRes.json())).toMatchObject({
+            error: "unauthorized_client",
+          });
+        }
+
+        // Complete PKCE flow for t3-mobile using t3code-private://oauth/callback.
+        const verifier = "mobile-pkce-verifier-0123456789abcdefghijklmnopqrstuvwxyz";
+        const redirectUri = "t3code-private://oauth/callback";
+        const authUrl = new URL("https://relay.crandalls.cloud/v1/auth/authorize");
+        authUrl.searchParams.set("response_type", "code");
+        authUrl.searchParams.set("client_id", "t3-mobile");
+        authUrl.searchParams.set("redirect_uri", redirectUri);
+        authUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
+        authUrl.searchParams.set("code_challenge_method", "S256");
+        authUrl.searchParams.set("state", "mobile-state-1");
+
+        const authRes = yield* Effect.promise(() => app.handler(new Request(authUrl)));
+        expect(authRes.status).toBe(302);
+        const ghLocation = new URL(authRes.headers.get("location")!);
+        const cookieHeader = authRes.headers.get("set-cookie")!.split(";")[0]!;
+
+        const cbUrl = new URL("https://relay.crandalls.cloud/v1/auth/github/callback");
+        cbUrl.searchParams.set("code", "gh-mobile-code");
+        cbUrl.searchParams.set("state", ghLocation.searchParams.get("state")!);
+        const cbRes = yield* Effect.promise(() =>
+          app.handler(new Request(cbUrl, { headers: { cookie: cookieHeader } })),
+        );
+        expect(cbRes.status).toBe(302);
+        const appCallback = new URL(cbRes.headers.get("location")!);
+        expect(`${appCallback.protocol}//${appCallback.host}${appCallback.pathname}`).toBe(
+          redirectUri,
+        );
+        expect(appCallback.searchParams.get("state")).toBe("mobile-state-1");
+        const relayCode = appCallback.searchParams.get("code")!;
+
+        const tokenRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "authorization_code",
+                client_id: "t3-mobile",
+                code: relayCode,
+                redirect_uri: redirectUri,
+                code_verifier: verifier,
+              }),
+            }),
+          ),
+        );
+        expect(tokenRes.status).toBe(200);
+        const tokens = (yield* Effect.promise(() => tokenRes.json())) as {
+          access_token: string;
+          refresh_token: string;
+        };
+        const claims = yield* Effect.gen(function* () {
+          const relayTokens = yield* RelayTokens.RelayTokens;
+          return yield* relayTokens.verifyClientAccessToken({ token: tokens.access_token });
+        }).pipe(Effect.provide(layerAuth));
+        expect(claims?.client_id).toBe("t3-mobile");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 });

@@ -1,27 +1,19 @@
 import { reportAtomCommandResult, settlePromise } from "../state/runtime.ts";
 
-/**
- * The slice of a Clerk instance the account service needs. Clerk emits on
- * every resource change (token refreshes, profile edits), so the service
- * dedupes emissions down to account changes.
- */
-export interface CloudAccountSource {
-  readonly addListener: (
-    listener: (resources: {
-      readonly client?: { readonly id?: string | null | undefined } | null | undefined;
-      readonly user?: { readonly id: string } | null | undefined;
-    }) => void,
-  ) => () => void;
-}
+export type CloudAccountSourceSnapshot =
+  | { readonly status: "loading" }
+  | { readonly status: "signedOut" }
+  | { readonly status: "signedIn"; readonly accountId: string };
 
 /**
- * Clerk's load status cannot prove its API answered: offline it emits an
- * id-less client, and a failed launch fetch emits a "client_init" placeholder
- * built from the session cookie. Only a real /v1/client response has an id.
+ * Auth state source observed by the cloud account service. While `loading`,
+ * the service stays unobserved so persisted environments survive cold start
+ * until local auth storage resolves to `signedIn` or `signedOut`.
  */
-const isClientFromClerkApi = (
-  client: { readonly id?: string | null | undefined } | null | undefined,
-) => Boolean(client?.id) && client?.id !== "client_init";
+export interface CloudAccountSource {
+  readonly getSnapshot?: () => CloudAccountSourceSnapshot;
+  readonly addListener: (listener: (snapshot: CloudAccountSourceSnapshot) => void) => () => void;
+}
 
 interface CloudAccountSignIn {
   readonly _tag: "SignIn";
@@ -207,26 +199,18 @@ export function createCloudAccountService<S extends CloudAccountSource>(
   return {
     attach(source) {
       detach();
+      const handleSnapshot = (snapshot: CloudAccountSourceSnapshot) => {
+        if (snapshot.status === "loading") return;
+        observe(source, snapshot.status === "signedIn" ? snapshot.accountId : null);
+      };
       const current = {
         source,
-        unsubscribe: source.addListener((resources) => {
-          // Clerk reports `user: undefined` until it loads; pending sessions
-          // still carry a user and count as signed in.
-          if (resources.user === undefined) return;
-          const next = resources.user?.id ?? null;
-          // An unreachable Clerk API at launch looks signed out; stay unobserved
-          // until Clerk confirms it, so saved environments survive offline starts.
-          if (
-            next === null &&
-            state._tag === "Unobserved" &&
-            !isClientFromClerkApi(resources.client)
-          ) {
-            return;
-          }
-          observe(source, next);
-        }),
+        unsubscribe: source.addListener(handleSnapshot),
       };
       attached = current;
+      if (source.getSnapshot) {
+        handleSnapshot(source.getSnapshot());
+      }
       return () => {
         if (attached === current) detach();
       };

@@ -76,10 +76,7 @@ vp install --frozen-lockfile
 
 node scripts/update-release-package-versions.ts "$VERSION"
 
-export T3CODE_CLERK_PUBLISHABLE_KEY="pk_live_Y2xlcmsudDMuY29kZXMk"
-export T3CODE_CLERK_JWT_TEMPLATE="t3-relay"
-export T3CODE_CLERK_CLI_OAUTH_CLIENT_ID="hzxSgY2cH10sDU2r"
-export T3CODE_RELAY_URL="https://relay.t3.codes"
+export T3CODE_RELAY_URL="https://relay.crandalls.cloud"
 export T3CODE_TELEMETRY_CHANNEL="dev"
 export APP_VERSION="$VERSION"
 

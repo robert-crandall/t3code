@@ -1,5 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useAuth } from "@clerk/react";
 import { findErrorTraceId, thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { AuthRelayReadScope, AuthRelayWriteScope, type EnvironmentId } from "@t3tools/contracts";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
@@ -31,7 +30,7 @@ import {
   updateEnvironmentPreferences as updateEnvironmentPreferencesAtom,
 } from "./linkEnvironmentAtoms";
 import { readCachedCloudLinkState, useCloudLinkState } from "./cloudLinkState";
-import { resolveRelayClerkTokenOptions } from "./publicConfig";
+import { useCloudAuth } from "./managedAuth";
 import { cloudChangeReplacesLink, isManagedTunnelActive } from "./t3ConnectState";
 
 export interface CloudLinkDesiredState {
@@ -54,7 +53,7 @@ function tunnelLimitFromLinkFailure(cause: unknown): number | null {
 }
 
 export function useCloudLinkController(environmentId: EnvironmentId | null) {
-  const { getToken, isSignedIn } = useAuth();
+  const { getToken, isSignedIn } = useCloudAuth();
   const refreshRelayEnvironments = useAtomCommand(relayEnvironmentDiscovery.refresh, {
     reportFailure: false,
   });
@@ -150,7 +149,7 @@ export function useCloudLinkController(environmentId: EnvironmentId | null) {
     if (!canManageLink()) return false;
     const wantsLink = desired.managedTunnel || desired.publish;
     if (wantsLink && readLinkState() === null) return false;
-    const tokenResult = await settlePromise(() => getToken(resolveRelayClerkTokenOptions()));
+    const tokenResult = await settlePromise(() => getToken());
     if (!canManageLink()) return false;
 
     // A failed mutation may have partially applied, so refresh server state on every exit.

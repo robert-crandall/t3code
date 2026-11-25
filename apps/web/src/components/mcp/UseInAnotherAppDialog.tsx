@@ -1,5 +1,4 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
-import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import {
   managedCapabilityDenial,
@@ -52,6 +51,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { relayEnvironmentDiscovery } from "~/state/relay";
 import { useEnvironmentScope, useEnvironmentSessionState } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useCloudAuth } from "~/cloud/managedAuth";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { CommandBlock } from "../CommandBlock";
 import { AccessOption, accessConfig } from "../auth/ConnectAgentSurface";
@@ -260,7 +260,7 @@ function useGrantableLevels(environment: EnvironmentPresentation) {
 
 function useGate(environment: EnvironmentPresentation) {
   const environmentId = environment.environmentId;
-  const { isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
+  const { isSignedIn } = useCloudAuth();
   const controller = useCloudLinkController(environmentId);
   const canReadRelay = useEnvironmentScope(environmentId, AuthRelayReadScope);
   const thisMachine =

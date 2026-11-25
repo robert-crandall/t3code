@@ -5,8 +5,8 @@ import "@fontsource-variable/inter";
 import "./index.css";
 
 import { trackKeyboardLayout } from "./keyboardLayout";
+import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
-import { isElectron } from "./env";
 import { startAppServices } from "./appInit";
 import { AppRoot } from "./AppRoot";
 import { whenLocaleReady } from "./i18n/runtime";
@@ -17,33 +17,18 @@ import.meta.hot?.dispose(stopTrackingKeyboardLayout);
 
 const router = startAppServices();
 
-const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
-
 const app = <AppRoot router={router} />;
 
-// Split by runtime to keep Clerk out of local startup and clerk-js out of browser builds.
-const managedAuthShellModule =
-  clerkPublishableKey && hasCloudPublicConfig()
-    ? isElectron
-      ? import("./components/clerk/ElectronManagedAuthShell")
-      : import("./components/clerk/BrowserManagedAuthShell")
-    : null;
-
-export const startup = Promise.all([
-  managedAuthShellModule?.then((module) => module.default) ?? null,
+export const startup = router
+  .load()
   // Chained so settings have usually hydrated; English resolves without a chunk load.
-  router.load().then(whenLocaleReady),
-])
-  .then(([ManagedAuthShell]) => {
+  .then(whenLocaleReady)
+  .then(() => {
     // Route chunk failures resolve router.load() and surface later through the error boundary.
     if (chunkLoadState.reloadScheduled) return;
     ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       <React.StrictMode>
-        {ManagedAuthShell && clerkPublishableKey ? (
-          <ManagedAuthShell publishableKey={clerkPublishableKey}>{app}</ManagedAuthShell>
-        ) : (
-          app
-        )}
+        {hasCloudPublicConfig() ? <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider> : app}
       </React.StrictMode>,
     );
   })

@@ -20,9 +20,30 @@ import * as RelayTokens from "./RelayTokens.ts";
 
 export const REFRESH_TOKEN_ROLLING_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 export const REFRESH_TOKEN_ABSOLUTE_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
+export const REFRESH_TOKEN_ROTATION_GRACE_WINDOW_MS = 60 * 1_000;
 const REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS = Math.floor(REFRESH_TOKEN_ABSOLUTE_TTL_MS / 1_000);
 const TOKEN_ENCRYPTION_SALT = new TextEncoder().encode("t3code-relay-oauth-github-token-v1");
 const TOKEN_ENCRYPTION_INFO = new TextEncoder().encode("aes-256-gcm");
+
+function isWithinRotationGraceWindow(
+  row: { readonly previousTokenHash: string | null; readonly rotatedAt: string | null },
+  tokenHash: string,
+  nowMs: number,
+): boolean {
+  if (
+    row.previousTokenHash === null ||
+    row.previousTokenHash !== tokenHash ||
+    row.rotatedAt === null
+  ) {
+    return false;
+  }
+  const rotatedAtMs = Date.parse(row.rotatedAt);
+  return (
+    Number.isFinite(rotatedAtMs) &&
+    nowMs >= rotatedAtMs &&
+    nowMs - rotatedAtMs <= REFRESH_TOKEN_ROTATION_GRACE_WINDOW_MS
+  );
+}
 
 export class OAuthSessionPersistenceError extends Schema.TaggedError<OAuthSessionPersistenceError>()(
   "OAuthSessionPersistenceError",
@@ -237,6 +258,8 @@ const make = Effect.gen(function* () {
       const values = {
         id: sessionId,
         currentTokenHash,
+        previousTokenHash: null,
+        encryptedCurrentRefreshToken: null,
         authCodeJti: input.authCodeJti ?? null,
         authCodeExpiresAt: input.authCodeExpiresAt ?? null,
         userId: input.userId,
@@ -314,7 +337,10 @@ const make = Effect.gen(function* () {
       if (row.revokedAt !== null) {
         return { _tag: "InvalidGrant", reason: "revoked" } as const;
       }
-      if (row.currentTokenHash !== tokenHash) {
+      if (
+        row.currentTokenHash !== tokenHash &&
+        !isWithinRotationGraceWindow(row, tokenHash, nowMs)
+      ) {
         yield* db
           .update(relayOauthSessions)
           .set({ revokedAt: nowIso, updatedAt: nowIso })
@@ -392,10 +418,17 @@ const make = Effect.gen(function* () {
           if (row.revokedAt !== null) {
             return { _tag: "InvalidGrant", reason: "revoked" } as const;
           }
-          if (row.currentTokenHash !== tokenHash) {
+          const isCurrentToken = row.currentTokenHash === tokenHash;
+          const isGraceRetry =
+            !isCurrentToken && isWithinRotationGraceWindow(row, tokenHash, nowMs);
+          if (!isCurrentToken && !isGraceRetry) {
             yield* db
               .update(relayOauthSessions)
-              .set({ revokedAt: nowIso, updatedAt: nowIso })
+              .set({
+                revokedAt: nowIso,
+                encryptedCurrentRefreshToken: null,
+                updatedAt: nowIso,
+              })
               .where(eq(relayOauthSessions.id, row.id));
             return { _tag: "InvalidGrant", reason: "replayed" } as const;
           }
@@ -411,6 +444,40 @@ const make = Effect.gen(function* () {
             return { _tag: "InvalidGrant", reason: "expired" } as const;
           }
 
+          const sessionIdentity: OAuthSessionIdentity = {
+            id: row.id,
+            userId: row.userId,
+            githubLogin: row.githubLogin,
+            ...(row.email !== null && row.email.length > 0 ? { email: row.email } : {}),
+            clientId: row.clientId,
+          };
+
+          if (isGraceRetry) {
+            const existingRefreshToken =
+              row.encryptedCurrentRefreshToken !== null
+                ? yield* openSecret(
+                    row.encryptedCurrentRefreshToken,
+                    `${row.id}:${row.clientId}:refresh`,
+                  )
+                : Option.none();
+            if (Option.isSome(existingRefreshToken)) {
+              return {
+                _tag: "Rotated",
+                session: sessionIdentity,
+                refreshToken: existingRefreshToken.value,
+              } as const;
+            }
+            yield* db
+              .update(relayOauthSessions)
+              .set({
+                revokedAt: nowIso,
+                encryptedCurrentRefreshToken: null,
+                updatedAt: nowIso,
+              })
+              .where(eq(relayOauthSessions.id, row.id));
+            return { _tag: "InvalidGrant", reason: "replayed" } as const;
+          }
+
           const nextExpiresAtMs = Math.min(
             nowMs + REFRESH_TOKEN_ROLLING_TTL_MS,
             absoluteExpiresAtMs,
@@ -424,11 +491,17 @@ const make = Effect.gen(function* () {
             absoluteExpiresAtMs,
           });
           const nextTokenHash = yield* hashToken(nextRefreshToken);
+          const encryptedCurrentRefreshToken = yield* sealSecret(
+            nextRefreshToken,
+            `${row.id}:${row.clientId}:refresh`,
+          );
 
           yield* db
             .update(relayOauthSessions)
             .set({
               currentTokenHash: nextTokenHash,
+              previousTokenHash: row.currentTokenHash,
+              encryptedCurrentRefreshToken,
               rotatedAt: nowIso,
               expiresAt: nextExpiresAtIso,
               updatedAt: nowIso,
@@ -437,13 +510,7 @@ const make = Effect.gen(function* () {
 
           return {
             _tag: "Rotated",
-            session: {
-              id: row.id,
-              userId: row.userId,
-              githubLogin: row.githubLogin,
-              ...(row.email !== null && row.email.length > 0 ? { email: row.email } : {}),
-              clientId: row.clientId,
-            },
+            session: sessionIdentity,
             refreshToken: nextRefreshToken,
           } as const;
         }),
@@ -473,7 +540,7 @@ const make = Effect.gen(function* () {
 
       yield* db
         .update(relayOauthSessions)
-        .set({ revokedAt: nowIso, updatedAt: nowIso })
+        .set({ revokedAt: nowIso, encryptedCurrentRefreshToken: null, updatedAt: nowIso })
         .where(condition)
         .pipe(
           Effect.mapError(
@@ -489,7 +556,7 @@ const make = Effect.gen(function* () {
     const nowIso = DateTime.formatIso(yield* DateTime.now);
     yield* db
       .update(relayOauthSessions)
-      .set({ revokedAt: nowIso, updatedAt: nowIso })
+      .set({ revokedAt: nowIso, encryptedCurrentRefreshToken: null, updatedAt: nowIso })
       .where(and(eq(relayOauthSessions.id, sessionId), isNull(relayOauthSessions.revokedAt)))
       .pipe(
         Effect.mapError(

@@ -2,15 +2,18 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   type CloudAccountSource,
+  type CloudAccountSourceSnapshot,
   createCloudAccountService,
   planCloudAccountStep,
 } from "./cloudAccountService.ts";
 
-type Emit = (user: { readonly id: string } | null | undefined, clientId?: string) => void;
+type Emit = (snapshot: CloudAccountSourceSnapshot) => void;
 
-function makeSource() {
+function makeSource(initial?: CloudAccountSourceSnapshot) {
   let listener: Parameters<CloudAccountSource["addListener"]>[0] | null = null;
+  let current: CloudAccountSourceSnapshot | undefined = initial;
   const source: CloudAccountSource = {
+    ...(initial !== undefined ? { getSnapshot: () => current! } : {}),
     addListener: (next) => {
       listener = next;
       return () => {
@@ -18,8 +21,10 @@ function makeSource() {
       };
     },
   };
-  const emit: Emit = (user, clientId = "client_1") =>
-    listener?.({ user, client: { id: clientId } });
+  const emit: Emit = (snapshot) => {
+    current = snapshot;
+    listener?.(snapshot);
+  };
   return { source, emit, isSubscribed: () => listener !== null };
 }
 
@@ -99,16 +104,16 @@ describe("planCloudAccountStep", () => {
 });
 
 describe("createCloudAccountService", () => {
-  it("activates once per account however often Clerk emits", async () => {
+  it("activates once per account however often the source emits", async () => {
     const { service, log, nextActivation } = makeService();
     const { source, emit } = makeSource();
     service.attach(source);
 
-    emit(undefined);
+    emit({ status: "loading" });
     expect(service.getState()).toEqual({ _tag: "Unobserved" });
     const activation = nextActivation();
-    emit({ id: "a" });
-    emit({ id: "a" });
+    emit({ status: "signedIn", accountId: "a" });
+    emit({ status: "signedIn", accountId: "a" });
     expect(service.getState()).toEqual({ _tag: "Activating", accountId: "a" });
     await activation;
 
@@ -116,17 +121,28 @@ describe("createCloudAccountService", () => {
     expect(log).toEqual(["prepare:a", "activate:a:false"]);
   });
 
+  it("reads initial snapshot on attach when provided", async () => {
+    const { service, log, nextActivation } = makeService();
+    const { source } = makeSource({ status: "signedIn", accountId: "github:42" });
+    const activation = nextActivation();
+    service.attach(source);
+    await activation;
+
+    expect(service.getState()).toEqual({ _tag: "Active", accountId: "github:42" });
+    expect(log).toEqual(["prepare:github:42", "activate:github:42:false"]);
+  });
+
   it("drops credentials synchronously and cleans up before activating the next account", async () => {
     const { service, log, nextActivation } = makeService();
     const { source, emit } = makeSource();
     service.attach(source);
     const first = nextActivation();
-    emit({ id: "a" });
+    emit({ status: "signedIn", accountId: "a" });
     await first;
     log.length = 0;
 
     const second = nextActivation();
-    emit({ id: "b" });
+    emit({ status: "signedIn", accountId: "b" });
     expect(log).toEqual(["deactivate"]);
     await second;
 
@@ -139,46 +155,34 @@ describe("createCloudAccountService", () => {
     service.attach(source);
 
     const initialCleanUp = nextCleanUp();
-    emit(null);
+    emit({ status: "signedOut" });
     await initialCleanUp;
     expect(log).toEqual(["deactivate", "cleanUp:null:false"]);
 
     const activation = nextActivation();
-    emit({ id: "a" });
+    emit({ status: "signedIn", accountId: "a" });
     await activation;
     log.length = 0;
 
     const cleanUp = nextCleanUp();
-    emit(null);
+    emit({ status: "signedOut" });
     await cleanUp;
     expect(service.getState()).toEqual({ _tag: "SignedOut" });
     expect(log).toEqual(["signOutTransition", "deactivate", "cleanUp:a:true"]);
   });
 
-  it("waits for Clerk's API to confirm a signed-out launch before cleaning up", async () => {
-    const { service, log, nextActivation, nextCleanUp } = makeService();
-    const { source, emit } = makeSource();
+  it("stays unobserved while loading before cleaning up on signed-out", async () => {
+    const { service, log, nextCleanUp } = makeService();
+    const { source, emit } = makeSource({ status: "loading" });
     service.attach(source);
 
-    // Offline: an id-less client, or the placeholder built from the session cookie.
-    emit(null, "");
-    emit(null, "client_init");
     expect(service.getState()).toEqual({ _tag: "Unobserved" });
     expect(log).toEqual([]);
 
     const cleanUp = nextCleanUp();
-    emit(null);
+    emit({ status: "signedOut" });
     await cleanUp;
     expect(log).toEqual(["deactivate", "cleanUp:null:false"]);
-
-    const activation = nextActivation();
-    emit({ id: "a" });
-    await activation;
-    log.length = 0;
-    const signOut = nextCleanUp();
-    emit(null, "client_init");
-    await signOut;
-    expect(log).toEqual(["signOutTransition", "deactivate", "cleanUp:a:true"]);
   });
 
   it("never activates an account that signed out while it was activating", async () => {
@@ -186,10 +190,10 @@ describe("createCloudAccountService", () => {
     const { source, emit } = makeSource();
     service.attach(source);
     const prepared = gate("a");
-    emit({ id: "a" });
+    emit({ status: "signedIn", accountId: "a" });
     await prepared.started.promise;
     const cleanUp = nextCleanUp();
-    emit(null);
+    emit({ status: "signedOut" });
     prepared.release.resolve();
     await cleanUp;
 
@@ -212,8 +216,6 @@ describe("createCloudAccountService", () => {
         attempts += 1;
         log.push(`prepare:${accountId}`);
         if (attempts === 1) {
-          // Queued before the rejection, so the service's catch runs before
-          // the test's `await failed.promise` continuation.
           queueMicrotask(failed.resolve);
           throw new Error("restore failed");
         }
@@ -225,12 +227,12 @@ describe("createCloudAccountService", () => {
     });
     const { source, emit } = makeSource();
     service.attach(source);
-    emit(null);
-    emit({ id: "a" });
+    emit({ status: "signedOut" });
+    emit({ status: "signedIn", accountId: "a" });
     await failed.promise;
     expect(service.getState()).toMatchObject({ _tag: "Failed", accountId: "a" });
 
-    emit({ id: "a" });
+    emit({ status: "signedIn", accountId: "a" });
     await activated.promise;
 
     expect(service.getState()).toEqual({ _tag: "Active", accountId: "a" });
@@ -243,7 +245,7 @@ describe("createCloudAccountService", () => {
     ]);
   });
 
-  it("detaches from a replaced Clerk instance", () => {
+  it("detaches from a replaced source instance", () => {
     const { service, log } = makeService();
     const first = makeSource();
     const second = makeSource();
@@ -260,7 +262,7 @@ describe("createCloudAccountService", () => {
     const { source, emit, isSubscribed } = makeSource();
     const detach = service.attach(source);
     const activation = nextActivation();
-    emit({ id: "a" });
+    emit({ status: "signedIn", accountId: "a" });
     await activation;
 
     detach();

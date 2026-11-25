@@ -8,10 +8,6 @@ import {
   deactivateManagedRelayAuthentication,
 } from "./managedAuth";
 
-vi.mock("@clerk/react", () => ({
-  useClerk: vi.fn(),
-}));
-
 vi.mock("../lib/runtime", () => ({
   runtime: {
     runPromiseExit: vi.fn(),
@@ -25,11 +21,13 @@ vi.mock("../connection/catalog", () => ({
 }));
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   deactivateManagedRelayAuthentication();
 });
 
 describe("managed relay authentication", () => {
   it("clears all token access synchronously before account cleanup can fail", async () => {
+    vi.stubEnv("VITE_T3CODE_RELAY_URL", "https://relay.example.test");
     activateManagedRelayAuthentication("account-1", async () => "account-1-token");
     expect(appAtomRegistry.get(managedRelaySessionAtom)?.accountId).toBe("account-1");
     const token = await Effect.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)).pipe(

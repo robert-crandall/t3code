@@ -1,4 +1,3 @@
-import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import type {
   AgentSessionProjectCandidate,
@@ -46,10 +45,10 @@ import { isElectron } from "../../env";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { usePersistEnvironmentProviderInstanceMutation } from "../../hooks/useSettings";
 import { useCloudLinkState } from "../../cloud/cloudLinkState";
+import { useCloudAuth } from "../../cloud/managedAuth";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
-import { retryClerkLoad, useClerkLoadFailed } from "../clerk/clerkLoadFailure";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { completeOnboarding } from "../../onboarding/firstRun";
 import {
@@ -1035,9 +1034,8 @@ function PhoneStep({ step, children }: { readonly step: number; readonly childre
 }
 
 function PhoneConnectLink({ environmentId }: { readonly environmentId: EnvironmentId }) {
-  const { isLoaded, isSignedIn, userId } = useAuth({ treatPendingAsSignedOut: false });
+  const { isLoaded, isSignedIn, userId } = useCloudAuth();
   const gt = useGT();
-  const loadFailed = useClerkLoadFailed();
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
   const linkState = useCloudLinkState(environmentId);
   const refreshLinkState = useEffectEvent(linkState.refresh);
@@ -1112,15 +1110,9 @@ function PhoneConnectLink({ environmentId }: { readonly environmentId: Environme
       <p className="text-sm text-foreground">
         <T>Sign in to T3 Connect here, then in the app with the same account.</T>
       </p>
-      {loadFailed ? (
-        <Button variant="outline" size="xs" onClick={retryClerkLoad}>
-          <T>Retry sign-in</T>
-        </Button>
-      ) : (
-        <Button variant="outline" size="xs" disabled={!isLoaded} onClick={openAuthPrompt}>
-          <T>Sign in to T3 Connect</T>
-        </Button>
-      )}
+      <Button variant="outline" size="xs" disabled={!isLoaded} onClick={openAuthPrompt}>
+        <T>Sign in to T3 Connect</T>
+      </Button>
     </>
   );
 }
