@@ -160,6 +160,22 @@ export pnpm_config_offline="true"
 
 vp install --frozen-lockfile --offline --ignore-scripts
 
+# Mac installs offline with --ignore-scripts, skipping react-native-enriched-markdown's
+# postinstall (RaTeX iOS math + tree-sitter grammars). Mirror those vendored assets from
+# Ubuntu's full install so copilot-fork/build-ios-app.sh stays ready after deploy-all.
+if [[ -d "$MAC_WORKTREE/apps/mobile/node_modules/react-native-enriched-markdown" ]]; then
+  MAC_ENRICHED_MD="$(cd "$MAC_WORKTREE/apps/mobile/node_modules/react-native-enriched-markdown" && pwd -P)"
+  UBUNTU_ENRICHED_MD="${UBUNTU_REPO}/apps/mobile/node_modules/react-native-enriched-markdown"
+  echo "[deploy-all] Syncing react-native-enriched-markdown vendored native assets from $UBUNTU_HOST..."
+  if mkdir -p "$MAC_ENRICHED_MD/ios/vendor" "$MAC_ENRICHED_MD/cpp/highlight/vendor"; then
+    rsync -az --delete "${UBUNTU_HOST}:${UBUNTU_ENRICHED_MD}/ios/vendor/" "$MAC_ENRICHED_MD/ios/vendor/" || rm -f "$MAC_ENRICHED_MD/ios/vendor/.stamp" || true
+    rsync -az --delete "${UBUNTU_HOST}:${UBUNTU_ENRICHED_MD}/cpp/highlight/vendor/" "$MAC_ENRICHED_MD/cpp/highlight/vendor/" || rm -f "$MAC_ENRICHED_MD/cpp/highlight/vendor/grammars/.stamp" || true
+  fi
+  if [[ ! -f "$MAC_ENRICHED_MD/ios/vendor/.stamp" || ! -f "$MAC_ENRICHED_MD/cpp/highlight/vendor/grammars/.stamp" ]]; then
+    echo "[deploy-all] WARNING: react-native-enriched-markdown vendor assets are incomplete; copilot-fork/build-ios-app.sh may fail or omit syntax highlighting." >&2
+  fi
+fi
+
 cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target aarch64-apple-darwin
 export T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR="true"
 
