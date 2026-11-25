@@ -3,13 +3,20 @@ import { readHashParams } from "./remote.ts";
 const CONNECT_AUTH_STATE_PARAM = "state";
 const CONNECT_AUTH_CHALLENGE_PARAM = "challenge";
 const CONNECT_AUTH_PORT_PARAM = "port";
-const CONNECT_LOOPBACK_CALLBACK_PATH = "/callback";
+export const CONNECT_LOOPBACK_CALLBACK_PATH = "/callback";
 
 const CONNECT_AUTHORIZE_PATH = "/connect";
 
 export const DEFAULT_HOSTED_APP_URL = "https://app.t3.codes";
 
 export const CONNECT_OAUTH_SCOPES = ["openid", "profile", "email", "offline_access"] as const;
+
+export const ALLOWED_MOBILE_OAUTH_SCHEMES = [
+  "t3code",
+  "t3code-dev",
+  "t3code-preview",
+  "t3code-private",
+] as const;
 
 export interface ConnectAuthorizeRequest {
   readonly state: string;
@@ -52,26 +59,7 @@ function parseLoopbackPort(value: string): number | null {
   return port >= 1 && port <= 65535 ? port : null;
 }
 
-/** Must match the loopback redirect URI registered on the Clerk CLI OAuth app. */
+/** Loopback callback URI used by local OAuth PKCE clients (CLI and desktop). */
 export function connectLoopbackRedirectUri(port: number): string {
   return `http://127.0.0.1:${port}${CONNECT_LOOPBACK_CALLBACK_PATH}`;
-}
-
-export function buildConnectClerkAuthorizeUrl(input: {
-  readonly authorizationEndpoint: string;
-  readonly clientId: string;
-  readonly redirectUri: string;
-  readonly scopes: ReadonlyArray<string>;
-  readonly state: string;
-  readonly challenge: string;
-}): string {
-  const url = new URL(input.authorizationEndpoint);
-  url.searchParams.set("client_id", input.clientId);
-  url.searchParams.set("redirect_uri", input.redirectUri);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", input.scopes.join(" "));
-  url.searchParams.set("state", input.state);
-  url.searchParams.set("code_challenge", input.challenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  return url.toString();
 }

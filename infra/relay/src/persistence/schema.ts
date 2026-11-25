@@ -206,6 +206,8 @@ export const relayOauthSessions = pgTable(
   {
     id: varchar("id", { length: 64 }).primaryKey(),
     currentTokenHash: varchar("current_token_hash", { length: 128 }).notNull(),
+    previousTokenHash: varchar("previous_token_hash", { length: 128 }),
+    encryptedCurrentRefreshToken: text("encrypted_current_refresh_token"),
     authCodeJti: varchar("auth_code_jti", { length: 128 }),
     authCodeExpiresAt: varchar("auth_code_expires_at", { length: 64 }),
     userId: varchar("user_id", { length: 191 }).notNull(),

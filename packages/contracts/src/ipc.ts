@@ -1245,12 +1245,53 @@ export interface DesktopBridge {
     onRequest: (listener: (request: DesktopAppActivationRequest) => void) => () => void;
   };
   preview: DesktopPreviewBridge;
+  cloudAuth?: DesktopCloudAuthBridge;
   /** On-device dictation through macOS 26 SpeechAnalyzer; absent in older desktop builds. */
   appleSpeech?: {
     supportedLocales: () => Promise<readonly string[]>;
     prepare: (locale: string) => Promise<DesktopAppleSpeechResult>;
     transcribe: (input: { locale: string; pcm: Uint8Array }) => Promise<DesktopAppleSpeechResult>;
   };
+}
+
+export const DesktopCloudAuthIdentitySchema = Schema.Struct({
+  userId: Schema.String,
+  login: Schema.String,
+  email: Schema.NullOr(Schema.String),
+});
+export type DesktopCloudAuthIdentity = typeof DesktopCloudAuthIdentitySchema.Type;
+
+export const DesktopCloudAuthStateSchema = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("loading"),
+    identity: Schema.Null,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("unavailable"),
+    identity: Schema.Null,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("signedOut"),
+    identity: Schema.Null,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("signedIn"),
+    identity: DesktopCloudAuthIdentitySchema,
+  }),
+]);
+export type DesktopCloudAuthState = typeof DesktopCloudAuthStateSchema.Type;
+
+export const DesktopCloudAuthGetTokenInputSchema = Schema.Struct({
+  forceRefresh: Schema.optional(Schema.Boolean),
+});
+export type DesktopCloudAuthGetTokenInput = typeof DesktopCloudAuthGetTokenInputSchema.Type;
+
+export interface DesktopCloudAuthBridge {
+  getState: () => Promise<DesktopCloudAuthState>;
+  getAccessToken: (input?: DesktopCloudAuthGetTokenInput) => Promise<string | null>;
+  signIn: () => Promise<DesktopCloudAuthState>;
+  signOut: () => Promise<DesktopCloudAuthState>;
+  onStateChange: (listener: (state: DesktopCloudAuthState) => void) => () => void;
 }
 
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */

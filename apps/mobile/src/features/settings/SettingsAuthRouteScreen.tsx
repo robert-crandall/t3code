@@ -1,24 +1,17 @@
-import { useAuth } from "@clerk/expo";
-import {
-  AuthView,
-  type UserProfileCustomPage,
-  UserProfileView,
-} from "@clerk/expo/native-components";
 import { useNavigation } from "@react-navigation/native";
+import { useGT } from "gt-react-native";
 import { useEffect, useState } from "react";
-import { View } from "react-native";
+import { ScrollView, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { AppBar } from "../../components/ui/AppBar";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
+import * as Dialog from "../../components/ui/Dialog";
+import { useCloudAuth } from "../cloud/CloudAuthProvider";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { T3ConnectProfilePage } from "../cloud/T3ConnectProfilePage";
-
-const USER_PROFILE_CUSTOM_PAGES = [
-  {
-    path: "t3-connect",
-    label: "T3 Connect",
-    icon: "globe",
-    content: <T3ConnectProfilePage />,
-  },
-] satisfies UserProfileCustomPage[];
 
 // Without cloud config the app has no entry point here and appLinking drops the deep link.
 export function SettingsAuthRouteScreen() {
@@ -26,36 +19,162 @@ export function SettingsAuthRouteScreen() {
 }
 
 function ConfiguredSettingsAuthRouteScreen() {
-  const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
+  const gt = useGT();
   const navigation = useNavigation();
+  const insets = useSafeAreaInsets();
+  const { isLoaded, isSignedIn, initError, identity, retryInitialize, signIn, signOut } =
+    useCloudAuth();
   const handleHostBack = () => navigation.goBack();
-  // Once signed in, stay on the profile view so signing out pops back instead of
-  // flashing the sign-in form.
-  const [hasBeenSignedIn, setHasBeenSignedIn] = useState(isSignedIn === true);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  // Once signed in, stay on the account view so signing out pops back instead of
+  // flashing the sign-in card.
+  const [hasBeenSignedIn, setHasBeenSignedIn] = useState(isSignedIn);
   if (isSignedIn && !hasBeenSignedIn) setHasBeenSignedIn(true);
 
-  // Clerk reports sign-out only through its auth store (the native profile view
-  // and the T3 Connect page can both sign out), so this follows that store.
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pops the navigator when Clerk's auth store reports a sign-out from the profile view or Connect page
+  // Follow the auth store so signing out pops the modal cleanly.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pops the navigator when the cloud auth store reports a sign-out
   useEffect(() => {
-    if (hasBeenSignedIn && isLoaded && isSignedIn === false) {
+    if (hasBeenSignedIn && isLoaded && !isSignedIn && !isSigningOut && authError === null) {
       navigation.goBack();
     }
-  }, [hasBeenSignedIn, isLoaded, isSignedIn, navigation]);
+  }, [authError, hasBeenSignedIn, isLoaded, isSignedIn, isSigningOut, navigation]);
+
+  const handleRetryInitialize = () => {
+    if (isRetrying) return;
+    setAuthError(null);
+    setIsRetrying(true);
+    void retryInitialize().finally(() => {
+      setIsRetrying(false);
+    });
+  };
+
+  const handleSignIn = () => {
+    if (isSigningIn) return;
+    setAuthError(null);
+    setIsSigningIn(true);
+    void signIn()
+      .catch((error) => {
+        setAuthError(error instanceof Error ? error.message : gt("Could not sign in with GitHub."));
+      })
+      .finally(() => {
+        setIsSigningIn(false);
+      });
+  };
+
+  const handleSignOut = () => {
+    if (isSigningOut) return;
+    Dialog.confirm({
+      title: gt("Sign out?"),
+      message: gt(
+        "Cloud connections on this device will be disconnected until you sign in again. Local connections are not changed.",
+      ),
+      confirmText: gt("Sign out"),
+      destructive: true,
+      onConfirm: () => {
+        setAuthError(null);
+        setIsSigningOut(true);
+        void signOut()
+          .catch((error) => {
+            setAuthError(error instanceof Error ? error.message : gt("Could not sign out."));
+          })
+          .finally(() => {
+            setIsSigningOut(false);
+          });
+      },
+    });
+  };
 
   return (
     <View collapsable={false} className="flex-1 overflow-hidden bg-sheet">
-      {isLoaded ? (
-        hasBeenSignedIn ? (
-          <UserProfileView
-            customPages={USER_PROFILE_CUSTOM_PAGES}
-            isDismissible={false}
-            onHostBack={handleHostBack}
-          />
-        ) : (
-          <AuthView isDismissible={false} onHostBack={handleHostBack} />
-        )
-      ) : null}
+      <AppBar title={hasBeenSignedIn ? gt("T3 Account") : gt("Sign in")} onClose={handleHostBack} />
+      {!isLoaded && initError === null ? (
+        <View className="flex-1 items-center justify-center p-6">
+          <AppActivityIndicator colorClassName="accent-foreground-muted" />
+        </View>
+      ) : hasBeenSignedIn ? (
+        <T3ConnectProfilePage
+          header={
+            <View collapsable={false} className="border-b border-border px-6 py-5">
+              <Text className="text-xs font-medium tracking-[0.3px] text-foreground-muted uppercase">
+                {gt("GitHub account")}
+              </Text>
+              <Text className="mt-2 text-lg font-t3-bold text-foreground">
+                {identity ? `@${identity.login}` : gt("Signed in")}
+              </Text>
+              {identity?.email ? (
+                <Text className="mt-0.5 text-sm text-foreground-muted">{identity.email}</Text>
+              ) : null}
+            </View>
+          }
+          footer={
+            <View
+              collapsable={false}
+              className="gap-3 px-6 pt-6"
+              style={{ paddingBottom: Math.max(insets.bottom, 16) }}
+            >
+              {authError ? (
+                <Text className="text-sm text-danger-foreground">{authError}</Text>
+              ) : null}
+              <Button
+                label={gt("Sign out")}
+                tone="danger"
+                fullWidth
+                loading={isSigningOut}
+                onPress={handleSignOut}
+              />
+            </View>
+          }
+        />
+      ) : (
+        <ScrollView
+          className="flex-1"
+          contentInsetAdjustmentBehavior="automatic"
+          contentContainerStyle={{
+            paddingHorizontal: 20,
+            paddingTop: 20,
+            paddingBottom: Math.max(insets.bottom, 24) + 16,
+            gap: 16,
+          }}
+        >
+          <View collapsable={false} className="gap-4 rounded-[24px] bg-grouped-card p-5">
+            <View collapsable={false} className="gap-1.5">
+              <Text className="text-lg font-t3-bold text-foreground">
+                {gt("Sign in to {product}", { product: "T3 Connect" })}
+              </Text>
+              <Text className="text-sm leading-normal text-foreground-muted">
+                {gt(
+                  "Sign in with GitHub to reach your servers through {product} and enable agent activity notifications.",
+                  { product: "T3 Connect" },
+                )}
+              </Text>
+            </View>
+            {authError || initError ? (
+              <Text className="text-sm text-danger-foreground">{authError ?? initError}</Text>
+            ) : null}
+            {initError ? (
+              <Button
+                label={gt("Retry loading session")}
+                tone="secondary"
+                fullWidth
+                disabled={isSigningIn}
+                loading={isRetrying}
+                onPress={handleRetryInitialize}
+              />
+            ) : null}
+            <Button
+              label={gt("Sign in with GitHub")}
+              tone="primary"
+              fullWidth
+              disabled={isRetrying}
+              loading={isSigningIn}
+              onPress={handleSignIn}
+            />
+          </View>
+        </ScrollView>
+      )}
     </View>
   );
 }

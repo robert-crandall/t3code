@@ -61,8 +61,8 @@ it.each([
   expect(config.extra?.observability?.tracesUrl).toBe("https://api.axiom.co/v1/traces");
   const clerkPlugin = (config.plugins ?? []).find(
     (entry) => Array.isArray(entry) && entry[0] === "@clerk/expo",
-  ) as [string, { appleSignIn: boolean }] | undefined;
-  expect(clerkPlugin?.[1].appleSignIn).toBe(true);
+  );
+  expect(clerkPlugin).toBeUndefined();
   // Copied thread links open this app only while app.t3.codes lists it.
   const host = new URL(DEFAULT_HOSTED_APP_URL).host;
   expect(config.ios?.associatedDomains).toContain(`applinks:${host}`);
@@ -108,10 +108,8 @@ it("supports custom paid-team iOS builds without upstream Ping defaults", async 
   expect(config.extra?.observability?.tracesUrl).toBeNull();
 
   const plugins = config.plugins ?? [];
-  const clerkPlugin = plugins.find(
-    (entry) => Array.isArray(entry) && entry[0] === "@clerk/expo",
-  ) as [string, { appleSignIn: boolean }] | undefined;
-  expect(clerkPlugin?.[1].appleSignIn).toBe(false);
+  const clerkPlugin = plugins.find((entry) => Array.isArray(entry) && entry[0] === "@clerk/expo");
+  expect(clerkPlugin).toBeUndefined();
 
   const widgetsPlugin = plugins.find(
     (entry) => Array.isArray(entry) && entry[0] === "expo-widgets",
@@ -133,25 +131,19 @@ it("wires custom relying party and EAS project into custom iOS builds when confi
   const config = await loadConfig("production", {
     T3CODE_IOS_BUNDLE_ID: "cloud.crandalls.t3code",
     T3CODE_IOS_TEAM_ID: "7492ZAHAJV",
-    T3CODE_IOS_RELYING_PARTY: "clerk.crandalls.cloud",
+    T3CODE_IOS_RELYING_PARTY: "relay.crandalls.cloud",
     T3CODE_EAS_PROJECT_ID: "11111111-2222-3333-4444-555555555555",
     T3CODE_EXPO_OWNER: "robert-crandall",
-    T3CODE_IOS_APPLE_SIGN_IN: "1",
   });
 
   expect(config.ios?.associatedDomains).toEqual([
-    "applinks:clerk.crandalls.cloud",
-    "webcredentials:clerk.crandalls.cloud",
+    "applinks:relay.crandalls.cloud",
+    "webcredentials:relay.crandalls.cloud",
   ]);
   expect(config.updates?.enabled).toBe(true);
   expect(config.updates?.url).toBe("https://u.expo.dev/11111111-2222-3333-4444-555555555555");
   expect(config.extra?.eas?.projectId).toBe("11111111-2222-3333-4444-555555555555");
   expect(config.owner).toBe("robert-crandall");
-
-  const clerkPlugin = (config.plugins ?? []).find(
-    (entry) => Array.isArray(entry) && entry[0] === "@clerk/expo",
-  ) as [string, { appleSignIn: boolean }] | undefined;
-  expect(clerkPlugin?.[1].appleSignIn).toBe(true);
 });
 
 it("preserves upstream defaults for upstream personal-team builds while omitting associatedDomains", async () => {
@@ -207,7 +199,7 @@ it("strips aps-environment and omits associatedDomains for personal-capability b
     T3CODE_IOS_PERSONAL_TEAM: "1",
     T3CODE_IOS_BUNDLE_ID: "cloud.crandalls.t3code",
     T3CODE_IOS_TEAM_ID: "7492ZAHAJV",
-    T3CODE_IOS_RELYING_PARTY: "clerk.crandalls.cloud",
+    T3CODE_IOS_RELYING_PARTY: "relay.crandalls.cloud",
   });
   expect(config.ios?.associatedDomains).toBeUndefined();
 
@@ -254,7 +246,13 @@ it("rejects invalid custom iOS bundle IDs, team IDs, schemes, relying parties, a
     "T3CODE_MOBILE_SCHEME",
   );
   await expect(
-    loadConfig("production", { T3CODE_IOS_RELYING_PARTY: "https://clerk.example.com" }),
+    loadConfig("production", {
+      T3CODE_RELAY_URL: "https://relay.crandalls.cloud",
+      T3CODE_MOBILE_SCHEME: "t3code-team",
+    }),
+  ).rejects.toThrow("T3CODE_MOBILE_SCHEME must be one of");
+  await expect(
+    loadConfig("production", { T3CODE_IOS_RELYING_PARTY: "https://auth.example.com" }),
   ).rejects.toThrow("T3CODE_IOS_RELYING_PARTY");
   await expect(loadConfig("production", { T3CODE_IOS_BUILD_NUMBER: "1.0-beta" })).rejects.toThrow(
     "T3CODE_IOS_BUILD_NUMBER",

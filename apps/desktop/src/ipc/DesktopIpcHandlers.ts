@@ -87,6 +87,12 @@ import {
 } from "./methods/legacyLocalStorage.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
 import {
+  getCloudAuthAccessToken,
+  getCloudAuthState,
+  signInCloudAuth,
+  signOutCloudAuth,
+} from "./methods/cloudAuth.ts";
+import {
   getCliCommandState,
   installCliCommand,
   uninstallCliCommand,
@@ -182,6 +188,10 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(installCliCommand);
   yield* ipc.handle(uninstallCliCommand);
   yield* ipc.handle(addCliCommandToPath);
+  yield* ipc.handle(getCloudAuthState);
+  yield* ipc.handle(getCloudAuthAccessToken);
+  yield* ipc.handle(signInCloudAuth);
+  yield* ipc.handle(signOutCloudAuth);
   for (const previewMethod of PreviewIpc.methods) {
     // Explicit types preserve the error/service union of these heterogeneous preview methods.
     yield* ipc.handle<

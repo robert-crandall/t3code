@@ -154,3 +154,9 @@ export const COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:complete-legacy-lo
 export const RESTART_AUDIO_SERVICE_CHANNEL = "desktop:restart-audio-service";
 
 export const START_FILE_DRAG_CHANNEL = "desktop:start-file-drag";
+
+export const CLOUD_AUTH_GET_STATE_CHANNEL = "desktop:cloud-auth-get-state";
+export const CLOUD_AUTH_GET_ACCESS_TOKEN_CHANNEL = "desktop:cloud-auth-get-access-token";
+export const CLOUD_AUTH_SIGN_IN_CHANNEL = "desktop:cloud-auth-sign-in";
+export const CLOUD_AUTH_SIGN_OUT_CHANNEL = "desktop:cloud-auth-sign-out";
+export const CLOUD_AUTH_STATE_CHANNEL = "desktop:cloud-auth-state";

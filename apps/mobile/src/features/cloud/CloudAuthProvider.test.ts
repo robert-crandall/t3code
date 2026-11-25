@@ -1,4 +1,7 @@
-import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
+import {
+  managedRelaySessionAtom,
+  type CloudAccountSourceSnapshot,
+} from "@t3tools/client-runtime/relay";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -7,18 +10,10 @@ import {
   cloudAccountService,
   deactivateCloudRelayAccount,
 } from "./cloudAccountService";
+import type { MobileCloudAuthAccountSource } from "./mobileCloudAuth";
 import { setAgentAwarenessRelayTokenProvider } from "../agent-awareness/remoteRegistration";
 import { requestConnectOnboarding } from "./connectOnboarding";
 import { restoreCloudComposerDrafts } from "../../state/use-composer-drafts";
-
-vi.mock("@clerk/expo", () => ({
-  ClerkProvider: vi.fn(),
-  useAuth: vi.fn(),
-}));
-
-vi.mock("@clerk/expo/token-cache", () => ({
-  tokenCache: {},
-}));
 
 vi.mock("../../lib/runtime", () => ({
   runtime: {
@@ -44,10 +39,8 @@ vi.mock("../../state/use-composer-drafts", () => ({
 
 vi.mock("./publicConfig", () => ({
   resolveCloudPublicConfig: vi.fn(() => ({
-    clerk: { publishableKey: null },
     relay: { url: null },
   })),
-  resolveRelayClerkTokenOptions: vi.fn(),
 }));
 
 vi.mock("../agent-awareness/remoteRegistration", () => ({
@@ -56,21 +49,25 @@ vi.mock("../agent-awareness/remoteRegistration", () => ({
   unregisterAgentAwarenessDeviceForCurrentUser: vi.fn(),
 }));
 
-type ClerkListener = (resources: { readonly user: { readonly id: string } | null }) => void;
+type SnapshotListener = (snapshot: CloudAccountSourceSnapshot) => void;
 
-function fakeClerk() {
-  const listeners = new Set<ClerkListener>();
-  const clerk = {
-    session: null,
-    addListener: (listener: ClerkListener) => {
+function fakeAuthSource() {
+  let current: CloudAccountSourceSnapshot = { status: "loading" };
+  const listeners = new Set<SnapshotListener>();
+  const source: MobileCloudAuthAccountSource = {
+    getSnapshot: () => current,
+    addListener: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-  } as unknown as Parameters<typeof cloudAccountService.attach>[0];
-  const emit = (userId: string | null) => {
-    for (const listener of listeners) listener({ user: userId === null ? null : { id: userId } });
+    getAccessToken: async () =>
+      current.status === "signedIn" ? `token-${current.accountId}` : null,
   };
-  return { clerk, emit };
+  const emit = (userId: string | null) => {
+    current = userId === null ? { status: "signedOut" } : { status: "signedIn", accountId: userId };
+    for (const listener of listeners) listener(current);
+  };
+  return { source, emit };
 }
 
 afterEach(() => {
@@ -95,8 +92,8 @@ describe("CloudAuthProvider relay account isolation", () => {
 
 describe("cloudAccountService", () => {
   it("activates the signed-in account once its drafts are restored", async () => {
-    const { clerk, emit } = fakeClerk();
-    using _detach = { [Symbol.dispose]: cloudAccountService.attach(clerk) };
+    const { source, emit } = fakeAuthSource();
+    using _detach = { [Symbol.dispose]: cloudAccountService.attach(source) };
 
     emit("account-1");
     expect(appAtomRegistry.get(managedRelaySessionAtom)).toBeNull();
@@ -105,13 +102,13 @@ describe("cloudAccountService", () => {
       expect(appAtomRegistry.get(managedRelaySessionAtom)?.accountId).toBe("account-1"),
     );
     expect(vi.mocked(restoreCloudComposerDrafts)).toHaveBeenCalledWith("account-1");
-    // Clerk already had this account on its first emission, so this is not a fresh sign-in.
+    // Already signed in on the first settled emission, so this is not a fresh sign-in.
     expect(vi.mocked(requestConnectOnboarding)).not.toHaveBeenCalled();
   });
 
   it("retries an activation whose draft restore failed on the next emission", async () => {
-    const { clerk, emit } = fakeClerk();
-    using _detach = { [Symbol.dispose]: cloudAccountService.attach(clerk) };
+    const { source, emit } = fakeAuthSource();
+    using _detach = { [Symbol.dispose]: cloudAccountService.attach(source) };
     vi.mocked(restoreCloudComposerDrafts).mockRejectedValueOnce(new Error("Storage busy."));
 
     emit("account-1");

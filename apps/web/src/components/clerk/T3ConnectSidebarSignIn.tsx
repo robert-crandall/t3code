@@ -1,11 +1,10 @@
-import { UserButton, useAuth } from "@clerk/react";
-import { T, useMessages } from "gt-react";
-import { LogInIcon, RotateCwIcon } from "lucide-react";
+import { T, useGT } from "gt-react";
+import { LogInIcon, UserIcon } from "lucide-react";
 
+import { useCloudAuth } from "../../cloud/managedAuth";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
-import { retryClerkLoad, useClerkLoadFailed } from "./clerkLoadFailure";
-import { T3_CONNECT_ACCOUNT_PAGES } from "./T3ConnectAccountPages";
+import { useT3ConnectAccountPage } from "./T3ConnectAccountPages";
 import { useT3ConnectAuthPrompt } from "./useT3ConnectAuthPrompt";
 
 export function T3ConnectSidebarSignIn() {
@@ -21,54 +20,36 @@ export function T3ConnectSidebarAvatar() {
 }
 
 function ConfiguredT3ConnectSidebarAvatar() {
-  const { isLoaded, isSignedIn } = useAuth();
-  const m = useMessages();
+  const { isLoaded, isSignedIn, identity } = useCloudAuth();
+  const accountPage = useT3ConnectAccountPage();
+  const gt = useGT();
 
   if (!isLoaded || !isSignedIn) return null;
 
+  const label = identity?.login ? `@${identity.login}` : gt("T3 Connect account");
+  const initial = identity?.login?.charAt(0).toUpperCase() ?? null;
+
   return (
-    <UserButton
-      appearance={{
-        elements: {
-          avatarBox: "size-7",
-          // Clerk's unlayered trigger reset (padding, radius, background) beats layered utilities.
-          userButtonTrigger: "mb-1! rounded-lg! p-1! hover:bg-sidebar-row-hover!",
-        },
-      }}
-    >
-      {T3_CONNECT_ACCOUNT_PAGES.map((page) => (
-        <UserButton.UserProfilePage
-          key={page.url}
-          label={m(page.label)}
-          labelIcon={page.icon}
-          url={page.url}
-        >
-          {page.content}
-        </UserButton.UserProfilePage>
-      ))}
-    </UserButton>
+    <>
+      <button
+        type="button"
+        aria-label={label}
+        onClick={() => accountPage.open?.("account")}
+        className="mb-1 flex size-9 items-center justify-center rounded-lg p-1 text-xs font-medium text-foreground transition-colors hover:bg-sidebar-row-hover"
+      >
+        <span className="flex size-7 items-center justify-center rounded-full bg-accent text-accent-foreground">
+          {initial ?? <UserIcon className="size-4" />}
+        </span>
+      </button>
+      {accountPage.portals}
+    </>
   );
 }
 
 function ConfiguredT3ConnectSidebarSignIn() {
-  const { isLoaded, isSignedIn } = useAuth();
-  const loadFailed = useClerkLoadFailed();
+  const { isLoaded, isSignedIn } = useCloudAuth();
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
 
-  if (loadFailed) {
-    return (
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton onClick={retryClerkLoad}>
-            <RotateCwIcon />
-            <span>
-              <T>Retry T3 Connect</T>
-            </span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    );
-  }
   if (!isLoaded || isSignedIn) return null;
 
   return (

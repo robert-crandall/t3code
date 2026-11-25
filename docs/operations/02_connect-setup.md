@@ -4,49 +4,25 @@ Deployment and client configuration for T3 Connect. See [T3 Connect](../internal
 
 ## Public application configuration
 
-T3 Connect is disabled in a fresh clone. Copy `.env.example` to `.env` for production, or set these public identifiers in `.env` / `.env.local` (process env > `.env.local` > `.env`):
+T3 Connect is disabled in a fresh clone. Copy `.env.example` to `.env`, or set the relay URL in `.env` / `.env.local` (process env > `.env.local` > `.env`):
 
 ```dotenv
-T3CODE_CLERK_PUBLISHABLE_KEY=<publishable key>
-T3CODE_CLERK_JWT_TEMPLATE=<JWT template name>
-T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=<public OAuth application client ID>
 T3CODE_RELAY_URL=https://relay.example.com
 ```
 
-`CLERK_SECRET_KEY` belongs only in relay secrets, never in client config. Client and bundled-server builds embed these values at build time; EAS preview/production environments need the publishable key, JWT template, and relay URL.
+Client and bundled-server builds embed `T3CODE_RELAY_URL` at build time; EAS preview/production environments only need `T3CODE_RELAY_URL`.
 
-## Clerk setup
+## GitHub OAuth setup (relay-hosted)
 
-### CLI OAuth application
+T3 Connect authenticates CLI, desktop, and mobile clients through the relay's built-in GitHub OAuth endpoints (`/v1/auth/authorize`, `/v1/auth/github/callback`, `/v1/auth/token`, `/v1/auth/device`, `/v1/auth/revoke`):
 
-Create a public OAuth application in Clerk (authorization code + PKCE):
-
-1. Redirect URI: `http://127.0.0.1:34338/callback`
-2. Scopes: `openid`, `profile`, `email`, `offline_access`
-3. Enable **Device authorization grant** (required for headless/SSH login; Clerk enables it per account on request).
-4. Set `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID` to its public client ID.
-
-### JWT template
-
-Create a Clerk JWT template named `t3-relay` with `{ "aud": "t3-code-relay" }`. Set `T3CODE_CLERK_JWT_TEMPLATE=t3-relay` on clients and `CLERK_JWT_AUDIENCE=t3-code-relay` on the relay.
-
-### Desktop OAuth redirects
-
-Enable Clerk's Native API, add `t3code-dev://app/` and `t3code://app/` to the SSO redirect allowlist, and add `t3code-dev://app` and `t3code://app` to `allowed_origins` via `PATCH https://api.clerk.com/v1/instance` (preserving existing entries).
-
-### Android native sign-in redirects
-
-In Clerk **Native applications > Allowlist for mobile SSO redirect**, allow each variant's callback:
-
-| Variant     | Callback                                      |
-| ----------- | --------------------------------------------- |
-| Development | `clerk://com.t3tools.t3code.dev.callback`     |
-| Preview     | `clerk://com.t3tools.t3code.preview.callback` |
-| Production  | `clerk://com.t3tools.t3code.callback`         |
-
-### Restricting sign-ups
-
-Use Clerk's allowlist or Restricted mode for new sign-ups (an enabled empty allowlist blocks all sign-ups). Ban the account in Clerk to revoke existing sessions.
+1. Create a GitHub OAuth App with callback URL `https://<your-relay-host>/v1/auth/github/callback`.
+2. Configure `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and a non-empty, comma-separated `GITHUB_OAUTH_ALLOWED_ORGS` list as relay secrets via Alchemy/Wrangler (never in client config). Alchemy provisions `CloudMintKeyPair` automatically.
+3. Built-in client IDs and redirect URIs handled by the relay:
+   - CLI (`t3-cli`): `http://127.0.0.1:<port>/callback` (PKCE) and `/v1/auth/device` (headless/SSH device flow)
+   - Desktop (`t3-desktop`): `http://127.0.0.1:<port>/callback` (Electron main-process loopback PKCE; the desktop renderer signs in via Electron IPC)
+   - Mobile (`t3-mobile`): `t3code://oauth/callback`, `t3code-dev://oauth/callback`, `t3code-preview://oauth/callback`, and `t3code-private://oauth/callback`
+4. Sign-in and token refresh require membership in at least one organization in `GITHUB_OAUTH_ALLOWED_ORGS`; leaving it empty disables authentication.
 
 ## Android FCM push setup
 
@@ -61,9 +37,8 @@ The relay sends Android push notifications directly via FCM HTTP v1 (no Expo Pus
 
 For a signed macOS build (`com.t3tools.t3code`):
 
-1. Create an explicit macOS App ID with **Associated Domains** and a matching distribution provisioning profile.
-2. In Clerk Native API settings, add an iOS app with the same Apple Team ID and bundle ID, and verify `https://<frontend-api>/.well-known/apple-app-site-association` includes `<TEAM_ID>.com.t3tools.t3code`.
-3. Configure signing per [Apple signing and notarization](./03_release.md#apple-signing-and-notarization-macos). Local signed builds use `T3CODE_APPLE_TEAM_ID`, `T3CODE_MACOS_PROVISIONING_PROFILE`, and optionally `T3CODE_CLERK_PASSKEY_RP_DOMAINS`. Bump the build version after changing Associated Domains so macOS refreshes cached Shared Web Credentials.
+1. Create an explicit macOS App ID and a matching distribution provisioning profile.
+2. Configure signing per [Apple signing and notarization](./03_release.md#apple-signing-and-notarization-macos). Local signed builds use `T3CODE_APPLE_TEAM_ID`, `T3CODE_MACOS_PROVISIONING_PROFILE`, and optionally `T3CODE_PASSKEY_RP_DOMAINS` if Associated Domains are needed. Bump the build version after changing Associated Domains so macOS refreshes cached Shared Web Credentials.
 
 Unsigned `dev:desktop` cannot exercise passkeys. For renderer HMR with passkeys, launch an installed signed build against `vp run dev:web`:
 

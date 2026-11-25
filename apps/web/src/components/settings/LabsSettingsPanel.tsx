@@ -1,10 +1,10 @@
 import { msg } from "gt-react";
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
-import { useAuth } from "@clerk/react";
 import { Link } from "@tanstack/react-router";
 import { AgentFeedbackMode } from "@t3tools/contracts";
 import { T, useGT, useMessages } from "gt-react";
 
+import { useCloudAuth } from "~/cloud/managedAuth";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
@@ -98,9 +98,9 @@ function BoringSidebarMultilineRow() {
 function GuestLinksRowWithSignIn() {
   const searchableSetting = useSearchableSetting();
   const gt = useGT();
-  const { isSignedIn } = useAuth();
+  const { isSignedIn } = useCloudAuth();
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
-  // `isSignedIn` is undefined until Clerk loads.
+  // `isSignedIn` is undefined until auth state loads.
   if (isSignedIn !== false) return <GuestLinksRow />;
   return (
     <SettingsRow

@@ -1,0 +1,68 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "5df92b91-4957-401a-957e-762e8d1df17b",
+  "prevIds": ["ecadbc8d-bd3f-41d9-b1be-760a3a067084"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "relay_oauth_sessions", "previous_token_hash"],
+      "writes": [
+        "s|col|public.relay_oauth_sessions.previous_token_hash",
+        "n|col|public.relay_oauth_sessions.previous_token_hash",
+        "e|col|public.relay_oauth_sessions.previous_token_hash"
+      ],
+      "reads": ["n|tbl|public.relay_oauth_sessions", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "relay_oauth_sessions",
+        "encrypted_current_refresh_token"
+      ],
+      "writes": [
+        "s|col|public.relay_oauth_sessions.encrypted_current_refresh_token",
+        "n|col|public.relay_oauth_sessions.encrypted_current_refresh_token",
+        "e|col|public.relay_oauth_sessions.encrypted_current_refresh_token"
+      ],
+      "reads": ["n|tbl|public.relay_oauth_sessions", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "previous_token_hash",
+        "type": "varchar(128)",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "relay_oauth_sessions",
+        "name": "encrypted_current_refresh_token",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    }
+  ]
+}

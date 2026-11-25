@@ -60,7 +60,12 @@ function confirmDeregister(environment: RelayClientEnvironmentRecord, onConfirm:
   });
 }
 
-export function T3ConnectProfilePage() {
+export function T3ConnectProfilePage(
+  props: {
+    readonly header?: ReactNode;
+    readonly footer?: ReactNode;
+  } = {},
+) {
   const gt = useGT();
   const m = useMessages();
   const environmentsState = useManagedRelayEnvironments();
@@ -153,7 +158,7 @@ export function T3ConnectProfilePage() {
 
   return (
     <ScrollView
-      className="flex-1 bg-clerk-page"
+      className="flex-1 bg-sheet"
       contentContainerClassName="pb-8"
       contentInsetAdjustmentBehavior="automatic"
       refreshControl={
@@ -163,16 +168,17 @@ export function T3ConnectProfilePage() {
         />
       }
     >
-      <ClerkSectionHeader>{gt("Registered servers")}</ClerkSectionHeader>
+      {props.header}
+      <SectionHeader>{gt("Registered servers")}</SectionHeader>
 
       {environmentsState.error ? (
         <>
-          <ClerkRow
+          <ServerRow
             title={gt("Could not load {product} environments", { product: "T3 Connect" })}
             subtitle={environmentsState.error}
           />
           {errorTraceId ? (
-            <ClerkButtonRow
+            <ActionRow
               label={gt("Copy trace ID")}
               onPress={() => {
                 copyTextWithHaptic(errorTraceId, { target: "connection-trace-id" });
@@ -182,23 +188,20 @@ export function T3ConnectProfilePage() {
         </>
       ) : isInitialLoad ? (
         <View className="flex-row items-center gap-3 px-6 py-4">
-          <AppActivityIndicator colorClassName={"accent-clerk-foreground-muted"} size="small" />
-          <Text className="text-base text-clerk-foreground-muted">
+          <AppActivityIndicator colorClassName={"accent-foreground-muted"} size="small" />
+          <Text className="text-base text-foreground-muted">
             <T>Loading environments</T>
           </Text>
         </View>
       ) : environments.length > 0 ? (
         environments.map((environment) => (
-          <ClerkRow
+          <ServerRow
             key={environment.environmentId}
             title={environment.label}
             subtitle={`${linkedAtLabel(environment.linkedAt, m)} · ${endpointLabel(environment, m)}`}
             accessory={
               deregisteringEnvironmentId === environment.environmentId ? (
-                <AppActivityIndicator
-                  colorClassName={"accent-clerk-foreground-muted"}
-                  size="small"
-                />
+                <AppActivityIndicator colorClassName={"accent-foreground-muted"} size="small" />
               ) : (
                 <View pointerEvents={deregisteringEnvironmentId === null ? "auto" : "none"}>
                   <Menu
@@ -220,7 +223,7 @@ export function T3ConnectProfilePage() {
                         <SymbolView
                           name="ellipsis"
                           size={18}
-                          tintColorClassName={"accent-clerk-foreground-muted"}
+                          tintColorClassName={"accent-foreground-muted"}
                           type="monochrome"
                         />
                       </View>
@@ -232,7 +235,7 @@ export function T3ConnectProfilePage() {
           />
         ))
       ) : (
-        <ClerkRow
+        <ServerRow
           title={gt("No servers registered")}
           subtitle={gt("Link a server from its local Settings to reach it through {product}.", {
             product: "T3 Connect",
@@ -240,22 +243,23 @@ export function T3ConnectProfilePage() {
         />
       )}
 
-      <Text className="px-6 pt-6 text-xs leading-normal text-clerk-foreground-muted">
+      <Text className="px-6 pt-6 text-xs leading-normal text-foreground-muted">
         <T>Connections on this device are managed in Settings.</T>
       </Text>
+      {props.footer}
     </ScrollView>
   );
 }
 
-function ClerkSectionHeader(props: { readonly children: string }) {
+function SectionHeader(props: { readonly children: string }) {
   return (
-    <Text className="min-h-4 border-b border-clerk-border px-6 pt-8 pb-4 text-xs font-medium tracking-[0.3px] text-clerk-foreground-muted uppercase">
+    <Text className="min-h-4 border-b border-border px-6 pt-8 pb-4 text-xs font-medium tracking-[0.3px] text-foreground-muted uppercase">
       {props.children}
     </Text>
   );
 }
 
-function ClerkRow(props: {
+function ServerRow(props: {
   readonly title: string;
   readonly subtitle: string;
   readonly accessory?: ReactNode;
@@ -263,13 +267,13 @@ function ClerkRow(props: {
   return (
     <View
       collapsable={false}
-      className="flex-row items-center gap-3 border-b border-clerk-border px-6 py-4"
+      className="flex-row items-center gap-3 border-b border-border px-6 py-4"
     >
       <View className="min-w-0 flex-1 gap-0.5">
-        <Text className="min-h-[22px] text-base text-clerk-foreground" numberOfLines={1}>
+        <Text className="min-h-[22px] text-base text-foreground" numberOfLines={1}>
           {props.title}
         </Text>
-        <Text className="min-h-5 text-sm text-clerk-foreground-muted" numberOfLines={2}>
+        <Text className="min-h-5 text-sm text-foreground-muted" numberOfLines={2}>
           {props.subtitle}
         </Text>
       </View>
@@ -278,14 +282,14 @@ function ClerkRow(props: {
   );
 }
 
-function ClerkButtonRow(props: { readonly label: string; readonly onPress: () => void }) {
+function ActionRow(props: { readonly label: string; readonly onPress: () => void }) {
   return (
     <Pressable
       accessibilityRole="button"
       onPress={props.onPress}
-      className="border-b border-clerk-border px-6 py-4 active:opacity-60"
+      className="border-b border-border px-6 py-4 active:opacity-60"
     >
-      <Text className="text-base font-semibold text-clerk-foreground">{props.label}</Text>
+      <Text className="text-base font-semibold text-foreground">{props.label}</Text>
     </Pressable>
   );
 }

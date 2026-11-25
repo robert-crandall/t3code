@@ -68,13 +68,9 @@ vi.mock(import("../../cloud/publicConfig"), async (original) => ({
   ...(await original()),
   hasCloudPublicConfig: () => state.cloud,
 }));
-vi.mock(import("@clerk/react"), async (original) => ({
+vi.mock(import("../../cloud/managedAuth"), async (original) => ({
   ...(await original()),
-  useAuth: (() => state.auth) as never,
-}));
-vi.mock(import("../clerk/clerkLoadFailure"), async (original) => ({
-  ...(await original()),
-  useClerkLoadFailed: () => false,
+  useCloudAuth: (() => state.auth) as never,
 }));
 vi.mock(import("../clerk/useT3ConnectAuthPrompt"), async (original) => ({
   ...(await original()),

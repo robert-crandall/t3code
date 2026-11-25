@@ -11,7 +11,7 @@ const SETTINGS_SEARCH_TERMS = {
     msg("sign in", { $context: "settings search keyword" }),
     msg("sign out", { $context: "settings search keyword" }),
     msg("login", { $context: "settings search keyword" }),
-    "clerk",
+    "github",
     msg("connect", { $context: "settings search keyword" }),
   ],
   SettingsEnvironments: [

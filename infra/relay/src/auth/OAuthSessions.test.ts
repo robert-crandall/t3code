@@ -322,13 +322,15 @@ describe("OAuthSessions", () => {
   );
 
   it.effect(
-    "serializes concurrent refresh rotations so replay revokes the whole session, and rolls back failed updates",
+    "returns the same rotated token during the 60s grace window, revokes replay after grace, and rolls back failed updates",
     () =>
       Effect.gen(function* () {
         let failUpdate = false;
         const { layerAuth, getForUpdateCount } = yield* setupPgliteOAuthTest({
           failUpdate: () => failUpdate,
         });
+        const startMs = Date.parse("2026-11-24T12:00:00.000Z");
+        yield* TestClock.setTime(startMs);
 
         const created = yield* Effect.gen(function* () {
           const sessions = yield* OAuthSessions.OAuthSessions;
@@ -340,7 +342,9 @@ describe("OAuthSessions", () => {
           });
         }).pipe(Effect.provide(layerAuth));
         expect(created._tag).toBe("Created");
-        if (created._tag !== "Created") return;
+        if (created._tag !== "Created") {
+          throw new Error(`Expected Created, got ${created._tag}`);
+        }
 
         // Failed update inside rotate rolls back cleanly and keeps the original refresh token usable.
         failUpdate = true;
@@ -353,7 +357,8 @@ describe("OAuthSessions", () => {
         expect(failedRotate._tag).toBe("Failure");
         failUpdate = false;
 
-        // Two simultaneous rotations with the same token: one rotates, the second triggers replay revocation.
+        // Two simultaneous rotations (or a lost-response retry within 60s) serialize via FOR UPDATE
+        // and return the exact same rotated refresh token so clients never diverge from the DB.
         const [first, second] = yield* Effect.all(
           [
             Effect.gen(function* () {
@@ -374,23 +379,126 @@ describe("OAuthSessions", () => {
           { concurrency: "unbounded" },
         );
 
-        const outcomes = [first, second];
-        const winner = outcomes.find((entry) => entry._tag === "Rotated");
-        const loser = outcomes.find((entry) => entry._tag === "InvalidGrant");
-        expect(winner?._tag).toBe("Rotated");
-        expect(loser).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+        expect(first._tag).toBe("Rotated");
+        expect(second._tag).toBe("Rotated");
+        if (first._tag !== "Rotated" || second._tag !== "Rotated") {
+          throw new Error(`Expected Rotated, got ${first._tag} and ${second._tag}`);
+        }
+        expect(first.refreshToken).toBe(second.refreshToken);
         expect(getForUpdateCount()).toBeGreaterThanOrEqual(3);
-        if (!winner || winner._tag !== "Rotated") return;
 
-        // The replay committed revocation, so the winner's new refresh token is also rejected.
+        // Retrying the previous token with small cross-worker clock skew slightly behind rotatedAt
+        // still succeeds within the rotation grace window on both inspectForRefresh and rotate.
+        yield* TestClock.setTime(startMs - 500);
+        const inspectedSkewedGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(inspectedSkewedGrace).toMatchObject({
+          _tag: "Ready",
+          githubAccessToken: "gho_concurrent_test",
+        });
+
+        const skewedGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.rotate({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(skewedGrace).toEqual(first);
+
+        // Retrying the previous token 30s later (still inside the 60s grace window) succeeds on
+        // inspectForRefresh and returns R1 on rotate.
+        yield* TestClock.setTime(startMs + 30_000);
+        const inspectedWithinGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(inspectedWithinGrace).toMatchObject({
+          _tag: "Ready",
+          githubAccessToken: "gho_concurrent_test",
+        });
+
+        const withinGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.rotate({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(withinGrace).toEqual(first);
+
+        // Replaying the previous token after the 60s grace window revokes the whole session.
+        yield* TestClock.setTime(startMs + 61_000);
+        const expiredGraceReplay = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.rotate({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(expiredGraceReplay).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+
+        // The replay committed revocation, so R1 is also rejected.
         const postReplay = yield* Effect.gen(function* () {
           const sessions = yield* OAuthSessions.OAuthSessions;
           return yield* sessions.inspectForRefresh({
-            refreshToken: winner.refreshToken,
+            refreshToken: first.refreshToken,
             clientId: "t3-cli",
           });
         }).pipe(Effect.provide(layerAuth));
         expect(postReplay).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // Verify inspectForRefresh also revokes on post-grace replay on a fresh session.
+        const secondSession = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.create({
+            userId: "github:43",
+            githubLogin: "octocat-2",
+            clientId: "t3-cli",
+            githubAccessToken: "gho_inspect_grace_test",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(secondSession._tag).toBe("Created");
+        if (secondSession._tag !== "Created") {
+          throw new Error(`Expected Created, got ${secondSession._tag}`);
+        }
+        const rotatedSecond = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.rotate({
+            refreshToken: secondSession.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(rotatedSecond._tag).toBe("Rotated");
+        if (rotatedSecond._tag !== "Rotated") {
+          throw new Error(`Expected Rotated, got ${rotatedSecond._tag}`);
+        }
+
+        yield* TestClock.setTime(startMs + 125_000);
+        const expiredInspect = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: secondSession.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(expiredInspect).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+        const afterExpiredInspect = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: rotatedSecond.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(afterExpiredInspect).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

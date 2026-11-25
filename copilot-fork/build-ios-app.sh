@@ -45,9 +45,7 @@ Environment overrides (also loaded from .env.ios.local if present):
   T3CODE_MOBILE_APP_NAME           Display name (default: T3 Code)
   T3CODE_MOBILE_SCHEME             URL scheme (default: t3code-private)
   T3CODE_RELAY_URL                 Optional self-hosted Cloudflare relay HTTPS URL
-  T3CODE_CLERK_PUBLISHABLE_KEY     Optional custom Clerk publishable key
-  T3CODE_CLERK_JWT_TEMPLATE        Optional custom Clerk JWT template
-  T3CODE_IOS_RELYING_PARTY         Optional custom Clerk relying party domain
+  T3CODE_IOS_RELYING_PARTY         Optional custom Associated Domains host
 EOF
 }
 
@@ -88,8 +86,6 @@ fi
 
 ALIAS_GROUPS_JSON='[
   ["T3CODE_RELAY_URL","VITE_T3CODE_RELAY_URL"],
-  ["T3CODE_CLERK_PUBLISHABLE_KEY","VITE_CLERK_PUBLISHABLE_KEY","EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY"],
-  ["T3CODE_CLERK_JWT_TEMPLATE","VITE_CLERK_JWT_TEMPLATE","EXPO_PUBLIC_CLERK_JWT_TEMPLATE"],
   ["T3CODE_MOBILE_OTLP_TRACES_URL","EXPO_PUBLIC_OTLP_TRACES_URL"],
   ["T3CODE_MOBILE_OTLP_TRACES_DATASET","EXPO_PUBLIC_OTLP_TRACES_DATASET"],
   ["T3CODE_MOBILE_OTLP_TRACES_TOKEN","EXPO_PUBLIC_OTLP_TRACES_TOKEN"]
@@ -182,15 +178,7 @@ CONFIG_META="$(printf '%s' "$CONFIG_JSON" | node -e '
     "api.axiom.co",
   ];
   const parsed = JSON.parse(raw);
-  const clerkKey = typeof parsed?.extra?.clerk?.publishableKey === "string"
-    ? parsed.extra.clerk.publishableKey
-    : "";
-  let decodedClerk = "";
-  const clerkMatch = clerkKey.match(/^pk_(?:live|test)_(.+)$/);
-  if (clerkMatch) {
-    decodedClerk = Buffer.from(clerkMatch[1], "base64").toString("utf8");
-  }
-  const haystack = `${raw}\n${decodedClerk}`.toLowerCase();
+  const haystack = raw.toLowerCase();
   const leaked = forbidden.filter((token) => haystack.includes(token.toLowerCase()));
   const bundleId = typeof parsed?.ios?.bundleIdentifier === "string" ? parsed.ios.bundleIdentifier : "";
   if (/^com\.t3tools\.t3code(?:\.|$)/i.test(bundleId)) {
@@ -279,11 +267,6 @@ else
       "T3CODE_IOS_RELYING_PARTY",
       "T3CODE_EAS_PROJECT_ID",
       "T3CODE_EXPO_OWNER",
-      "T3CODE_IOS_APPLE_SIGN_IN",
-      "EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID",
-      "EXPO_PUBLIC_CLERK_GOOGLE_IOS_CLIENT_ID",
-      "EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID",
-      "EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME",
       "EXPO_PUBLIC_MARKETING_SITE_URL",
     ];
     const lines = ["", "# Private fork build isolation (written by copilot-fork/build-ios-app.sh)"];

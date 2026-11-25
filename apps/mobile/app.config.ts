@@ -1,5 +1,6 @@
 import type { ExpoConfig } from "expo/config";
 
+import { ALLOWED_MOBILE_OAUTH_SCHEMES } from "../../packages/shared/src/connectAuth.ts";
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
@@ -62,8 +63,18 @@ if (customScheme && !URL_SCHEME_PATTERN.test(customScheme)) {
   throw new Error("T3CODE_MOBILE_SCHEME must be a lowercase URL scheme such as t3code-private.");
 }
 
+if (
+  relayUrl &&
+  customScheme &&
+  !(ALLOWED_MOBILE_OAUTH_SCHEMES as readonly string[]).includes(customScheme)
+) {
+  throw new Error(
+    `T3CODE_MOBILE_SCHEME must be one of ${ALLOWED_MOBILE_OAUTH_SCHEMES.join(", ")} when T3CODE_RELAY_URL is configured.`,
+  );
+}
+
 if (customRelyingParty && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(customRelyingParty)) {
-  throw new Error("T3CODE_IOS_RELYING_PARTY must be a bare hostname such as clerk.example.com.");
+  throw new Error("T3CODE_IOS_RELYING_PARTY must be a bare hostname such as auth.example.com.");
 }
 
 if (customIosBuildNumber && !IOS_BUILD_NUMBER_PATTERN.test(customIosBuildNumber)) {
@@ -126,7 +137,6 @@ const VARIANT_CONFIG = {
     scheme: "t3code-dev",
     iosBundleIdentifier: "com.t3tools.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
-    relyingParty: "clerk.t3.codes",
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
@@ -134,7 +144,6 @@ const VARIANT_CONFIG = {
     scheme: "t3code-preview",
     iosBundleIdentifier: "com.t3tools.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
-    relyingParty: "clerk.t3.codes",
     assets: PREVIEW_ASSETS,
   },
   production: {
@@ -142,7 +151,6 @@ const VARIANT_CONFIG = {
     scheme: "t3code",
     iosBundleIdentifier: "com.t3tools.t3code",
     androidPackage: "com.t3tools.t3code",
-    relyingParty: "clerk.t3.codes",
     assets: RELEASE_ASSETS,
   },
 } as const;
@@ -176,7 +184,7 @@ const keychainAccessBundleId = isCustomIosIdentity
   : variant.iosBundleIdentifier;
 
 const hostedAppHost = isCustomIosIdentity ? undefined : HOSTED_APP_HOST;
-const relyingParty = customRelyingParty ?? (isCustomIosIdentity ? undefined : variant.relyingParty);
+const relyingParty = customRelyingParty;
 const associatedDomains = isIosPersonalTeamBuild
   ? []
   : [
@@ -188,9 +196,6 @@ const easProjectId =
   customEasProjectId ?? (isCustomIosIdentity ? undefined : UPSTREAM_EAS_PROJECT_ID);
 const expoOwner = customExpoOwner ?? (isCustomIosIdentity ? undefined : UPSTREAM_EXPO_OWNER);
 const updatesEnabled = Boolean(easProjectId) && repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0";
-const appleSignInEnabled = isCustomIosIdentity
-  ? !isIosPersonalTeamBuild && repoEnv.T3CODE_IOS_APPLE_SIGN_IN === "1"
-  : !isIosPersonalTeamBuild;
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -441,8 +446,6 @@ const config: ExpoConfig = {
         mode: APP_VARIANT === "development" ? "development" : "production",
       },
     ],
-    // @clerk/expo adds Sign in with Apple entitlement unless appleSignIn is false.
-    ["@clerk/expo", { theme: "./clerk-theme.json", appleSignIn: appleSignInEnabled }],
     "expo-web-browser",
     [
       "expo-quick-actions",
@@ -545,15 +548,6 @@ const config: ExpoConfig = {
     relay: {
       url: relayUrl,
     },
-    clerk: {
-      publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim() || null,
-      jwtTemplate: repoEnv.EXPO_PUBLIC_CLERK_JWT_TEMPLATE?.trim() || null,
-    },
-    // Clerk reads these exact names at prebuild. Omit unset values: manifest null becomes truthy {}.
-    EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID,
-    EXPO_PUBLIC_CLERK_GOOGLE_IOS_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_IOS_CLIENT_ID,
-    EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID,
-    EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME,
     observability: {
       tracesUrl:
         repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL?.trim() ||

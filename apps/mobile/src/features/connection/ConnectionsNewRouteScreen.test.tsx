@@ -33,7 +33,20 @@ vi.mock("@react-navigation/native", () => ({
   useRoute: () => ({ name: "ConnectionsNew" }),
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
-vi.mock("@clerk/expo", () => ({ useAuth: () => ({ isLoaded: false, isSignedIn: false }) }));
+vi.mock("../cloud/CloudAuthProvider", () => ({
+  useCloudAuth: () => ({
+    status: "loading",
+    isLoaded: false,
+    isSignedIn: false,
+    initError: null,
+    userId: null,
+    identity: null,
+    getToken: async () => null,
+    retryInitialize: async () => undefined,
+    signIn: async () => ({ status: "cancelled" }),
+    signOut: async () => undefined,
+  }),
+}));
 vi.mock("expo-camera", () => ({
   CameraView: () => null,
   useCameraPermissions: () => [null, vi.fn()],
