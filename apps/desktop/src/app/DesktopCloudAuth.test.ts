@@ -369,7 +369,7 @@ describe("DesktopCloudAuth", () => {
   );
 
   it.effect(
-    "retries transient startup decryption failures once and falls back to signedOut without deleting session.json when retries fail",
+    "retries transient startup decryption failures once and falls back to unavailable without deleting session.json when retries fail",
     () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -417,7 +417,7 @@ describe("DesktopCloudAuth", () => {
           copyText: () => Effect.void,
         });
 
-        // Case 1: Keychain fails once, succeeds on scheduled retry -> hydrates signedIn.
+        // Case 1: Keychain fails once, succeeds on scheduled retry -> hydrates signedIn even if getAccessToken overlaps.
         let failDecryptRemaining = 1;
         const transientSafeStorage = ElectronSafeStorage.ElectronSafeStorage.of({
           isEncryptionAvailable: Effect.succeed(true),
@@ -462,7 +462,9 @@ describe("DesktopCloudAuth", () => {
         yield* Effect.gen(function* () {
           const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
           yield* auth.start;
-          // Initial failure schedules retry while staying loading briefly.
+          // Initial failure schedules retry while staying loading briefly; overlapping calls must not cancel retry.
+          assert.deepStrictEqual(yield* auth.getState, { status: "loading", identity: null });
+          assert.isNull(yield* auth.getAccessToken());
           assert.deepStrictEqual(yield* auth.getState, { status: "loading", identity: null });
           const nextState = yield* Effect.promise(() => recoveredBroadcast.promise);
           assert.deepStrictEqual(nextState, {
@@ -470,9 +472,10 @@ describe("DesktopCloudAuth", () => {
             identity: { userId: "gh_42", login: "robert-crandall", email: "robert@example.com" },
           });
           assert.deepStrictEqual(yield* auth.getState, nextState);
+          assert.strictEqual(yield* auth.getAccessToken(), accessToken);
         }).pipe(Effect.scoped, Effect.provide(recoverLayer));
 
-        // Case 2: Keychain stays failing -> transitions to signedOut, preserves session.json, getAccessToken returns null.
+        // Case 2: Keychain stays failing -> transitions to unavailable, preserves session.json, and avoids extra decrypt attempts.
         const fallbackBroadcast = Promise.withResolvers<DesktopCloudAuthState>();
         const fallbackWindow = {
           sendAll: (channel: string, payload: unknown) =>
@@ -484,17 +487,20 @@ describe("DesktopCloudAuth", () => {
           currentMainOrFirst: Effect.succeedNone,
           reveal: () => Effect.void,
         } as unknown as ElectronWindow.ElectronWindow["Service"];
+        let decryptAttempts = 0;
         const alwaysFailSafeStorage = ElectronSafeStorage.ElectronSafeStorage.of({
           isEncryptionAvailable: Effect.succeed(true),
           selectedStorageBackend: Effect.succeedNone,
           encryptString: (plaintext) =>
             Effect.succeed(new Uint8Array(Buffer.from(`enc:${plaintext}`, "utf8"))),
-          decryptString: () =>
-            Effect.fail(
+          decryptString: () => {
+            decryptAttempts += 1;
+            return Effect.fail(
               new ElectronSafeStorage.ElectronSafeStorageDecryptError({
                 cause: new Error("keychain locked"),
               }),
-            ),
+            );
+          },
         });
 
         const fallbackLayer = Layer.effect(
@@ -522,9 +528,11 @@ describe("DesktopCloudAuth", () => {
           const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
           yield* auth.start;
           const nextState = yield* Effect.promise(() => fallbackBroadcast.promise);
-          assert.deepStrictEqual(nextState, { status: "signedOut", identity: null });
-          assert.deepStrictEqual(yield* auth.getState, { status: "signedOut", identity: null });
+          assert.deepStrictEqual(nextState, { status: "unavailable", identity: null });
+          assert.deepStrictEqual(yield* auth.getState, { status: "unavailable", identity: null });
+          assert.strictEqual(decryptAttempts, 2);
           assert.isNull(yield* auth.getAccessToken());
+          assert.strictEqual(decryptAttempts, 2);
           assert.isTrue(yield* fileSystem.exists(sessionPath));
         }).pipe(Effect.scoped, Effect.provide(fallbackLayer));
       }).pipe(Effect.provide(NodeServices.layer)),
@@ -570,8 +578,11 @@ describe("DesktopCloudAuth", () => {
       yield* Effect.gen(function* () {
         const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
         yield* auth.start;
-        const exit = yield* Effect.exit(auth.signIn);
-        assert.isTrue(Exit.isFailure(exit));
+        const result = yield* Effect.result(auth.signIn);
+        assert.strictEqual(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.include(result.failure.message.toLowerCase(), "timed out");
+        }
       }).pipe(Effect.scoped, Effect.provide(layer));
     }).pipe(Effect.provide(NodeServices.layer)),
   );

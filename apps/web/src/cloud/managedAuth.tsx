@@ -76,7 +76,8 @@ export function activateManagedRelayAuthentication(
 }
 
 function toCloudAccountSnapshot(state: DesktopCloudAuthState): CloudAccountSourceSnapshot {
-  if (state.status === "loading") {
+  // Keep saved relay environments intact when keychain storage is temporarily unavailable.
+  if (state.status === "loading" || state.status === "unavailable") {
     return { status: "loading" };
   }
   if (state.status === "signedIn") {

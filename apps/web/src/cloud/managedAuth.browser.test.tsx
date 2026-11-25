@@ -118,4 +118,43 @@ describe("ManagedRelayAuthProvider", () => {
     await screen.unmount();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps saved relay environments intact when desktop cloud auth reports unavailable", async () => {
+    const { runtime } = await import("../lib/runtime");
+    const runPromiseExit = vi.mocked(runtime.runPromiseExit);
+    runPromiseExit.mockClear();
+
+    let listener: ((next: DesktopCloudAuthState) => void) | null = null;
+    using _bridge = stubDesktopCloudAuth({
+      getState: vi.fn(async () => ({ status: "unavailable" as const, identity: null })),
+      onStateChange: vi.fn((cb) => {
+        listener = cb;
+        return () => {
+          listener = null;
+        };
+      }),
+      getAccessToken: vi.fn(async () => null),
+      signIn: vi.fn(async () => ({ status: "unavailable" as const, identity: null })),
+      signOut: vi.fn(async () => ({ status: "signedOut" as const, identity: null })),
+    });
+
+    await using screen = await render(
+      <ManagedRelayAuthProvider>
+        <AuthProbe />
+      </ManagedRelayAuthProvider>,
+    );
+
+    const probe = screen.getByTestId("auth-state");
+    await expect.element(probe).toHaveAttribute("data-status", "unavailable");
+    expect(appAtomRegistry.get(managedRelaySessionAtom)).toBeNull();
+    // Crucial: unavailable must NOT trigger removeRelayEnvironments cleanup.
+    expect(runPromiseExit).not.toHaveBeenCalled();
+
+    // Confirmed signOut DOES run cleanup.
+    await act(async () => {
+      listener?.({ status: "signedOut", identity: null });
+    });
+    await expect.element(probe).toHaveAttribute("data-status", "signedOut");
+    expect(runPromiseExit).toHaveBeenCalledTimes(1);
+  });
 });

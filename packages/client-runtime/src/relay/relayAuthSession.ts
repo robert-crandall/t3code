@@ -15,7 +15,7 @@ export interface RelayStoredSession {
   readonly refreshToken: string;
   readonly expiresAtMs: number;
   readonly identity: RelayAuthIdentity;
-  readonly relayOrigin?: string | undefined;
+  readonly relayOrigin: string;
 }
 
 export type RelayAuthSnapshot =
@@ -241,7 +241,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
 
   const matchesRelayOrigin = (candidate: RelayStoredSession | null): RelayStoredSession | null => {
     if (candidate === null) return null;
-    if (candidate.relayOrigin !== undefined && candidate.relayOrigin !== origin) {
+    if (candidate.relayOrigin !== origin) {
       return null;
     }
     return candidate;
@@ -353,8 +353,19 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (generation !== attemptGeneration) {
         return new Error("Sign-in was superseded or signed out.");
       }
-      const previousDiskSession = await options.store.load().catch(() => null);
-      await options.store.save(nextSession);
+      let previousDiskSession: RelayStoredSession | null;
+      try {
+        previousDiskSession = await options.store.load();
+      } catch (error) {
+        return error instanceof Error
+          ? error
+          : new Error("Could not read existing relay session before saving.");
+      }
+      try {
+        await options.store.save(nextSession);
+      } catch (error) {
+        return error instanceof Error ? error : new Error("Could not save relay session.");
+      }
       if (input.signal?.aborted || generation !== attemptGeneration) {
         if (previousDiskSession !== null) {
           await options.store.save(previousDiskSession).catch(() => undefined);

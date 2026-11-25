@@ -223,16 +223,12 @@ jobs:
           echo "version=${base_version}-pr.${PR_NUMBER}.${BUILD_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
           head_file .env.example > "$RUNNER_TEMP/head.env.example"
-          for key in relay_url:T3CODE_RELAY_URL; do
-            output="${key%%:*}"
-            name="${key##*:}"
-            value="$(sed -n "s/^${name}=//p" "$RUNNER_TEMP/head.env.example" | head -n 1)"
-            if [[ ! "$value" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
-              echo "$name is missing or malformed in .env.example at $HEAD_SHA." >&2
-              exit 1
-            fi
-            echo "${output}=${value}" >> "$GITHUB_OUTPUT"
-          done
+          relay_url="$(sed -n 's/^T3CODE_RELAY_URL=//p' "$RUNNER_TEMP/head.env.example" | head -n 1)"
+          if [[ ! "$relay_url" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+            echo "T3CODE_RELAY_URL is missing or malformed in .env.example at $HEAD_SHA." >&2
+            exit 1
+          fi
+          echo "relay_url=${relay_url}" >> "$GITHUB_OUTPUT"
 
       # Only the default-branch revision that owns this workflow supplies the
       # validator. Never check out the PR in a workflow_run job.

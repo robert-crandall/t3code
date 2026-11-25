@@ -88,6 +88,7 @@ describe("mobileCloudAuth", () => {
       refreshToken: "ref-1",
       expiresAtMs: 1_900_000_000_000,
       identity: { userId: "github:42", login: "octocat", email: "octocat@example.com" },
+      relayOrigin: "https://relay.example.test",
     };
 
     await store.save(stored);
@@ -196,6 +197,7 @@ describe("mobileCloudAuth", () => {
       refreshToken: "live-refresh-token",
       expiresAtMs: 1_800_000_000_000,
       identity: { userId: "github:99", login: "octocat", email: null },
+      relayOrigin: "https://relay.example.test",
     });
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

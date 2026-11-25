@@ -342,7 +342,9 @@ describe("OAuthSessions", () => {
           });
         }).pipe(Effect.provide(layerAuth));
         expect(created._tag).toBe("Created");
-        if (created._tag !== "Created") return;
+        if (created._tag !== "Created") {
+          throw new Error(`Expected Created, got ${created._tag}`);
+        }
 
         // Failed update inside rotate rolls back cleanly and keeps the original refresh token usable.
         failUpdate = true;
@@ -379,7 +381,9 @@ describe("OAuthSessions", () => {
 
         expect(first._tag).toBe("Rotated");
         expect(second._tag).toBe("Rotated");
-        if (first._tag !== "Rotated" || second._tag !== "Rotated") return;
+        if (first._tag !== "Rotated" || second._tag !== "Rotated") {
+          throw new Error(`Expected Rotated, got ${first._tag} and ${second._tag}`);
+        }
         expect(first.refreshToken).toBe(second.refreshToken);
         expect(getForUpdateCount()).toBeGreaterThanOrEqual(3);
 
@@ -462,7 +466,10 @@ describe("OAuthSessions", () => {
             githubAccessToken: "gho_inspect_grace_test",
           });
         }).pipe(Effect.provide(layerAuth));
-        if (secondSession._tag !== "Created") return;
+        expect(secondSession._tag).toBe("Created");
+        if (secondSession._tag !== "Created") {
+          throw new Error(`Expected Created, got ${secondSession._tag}`);
+        }
         const rotatedSecond = yield* Effect.gen(function* () {
           const sessions = yield* OAuthSessions.OAuthSessions;
           return yield* sessions.rotate({
@@ -470,7 +477,10 @@ describe("OAuthSessions", () => {
             clientId: "t3-cli",
           });
         }).pipe(Effect.provide(layerAuth));
-        if (rotatedSecond._tag !== "Rotated") return;
+        expect(rotatedSecond._tag).toBe("Rotated");
+        if (rotatedSecond._tag !== "Rotated") {
+          throw new Error(`Expected Rotated, got ${rotatedSecond._tag}`);
+        }
 
         yield* TestClock.setTime(startMs + 125_000);
         const expiredInspect = yield* Effect.gen(function* () {

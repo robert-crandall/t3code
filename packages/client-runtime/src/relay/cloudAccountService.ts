@@ -34,10 +34,10 @@ export type CloudAccountStep =
   | CloudAccountSignIn;
 
 /**
- * `previous` is undefined until Clerk's first emission. A first emission that
+ * `previous` is undefined until the auth source's first emission. A first emission that
  * is signed out still cleans up, so data left by an account that signed out
  * while the app was closed does not linger. The service only plans that step
- * once Clerk's API has confirmed the sign-out.
+ * once the auth source has confirmed the sign-out.
  */
 export function planCloudAccountStep(
   previous: string | null | undefined,
@@ -77,7 +77,7 @@ export interface CloudAccountHandlers<S extends CloudAccountSource> {
     readonly isAccountTransition: boolean;
   }) => void;
   readonly onSignOutTransition?: () => void;
-  /** Releases credentials when the service stops observing a Clerk instance. */
+  /** Releases credentials when the service stops observing an auth source. */
   readonly detach: () => void;
 }
 
@@ -88,8 +88,8 @@ export type CloudAccountState =
   | { readonly _tag: "Active"; readonly accountId: string }
   /**
    * Activation rejected. The next emission for the same account retries the
-   * original step, so a transient failure recovers on Clerk's next resource
-   * change (token refreshes emit regularly) without re-requesting onboarding.
+   * original step, so a transient failure recovers on the next auth state
+   * emission without re-requesting onboarding.
    */
   | {
       readonly _tag: "Failed";

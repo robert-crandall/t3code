@@ -169,6 +169,7 @@ describe("relayAuthSession", () => {
       refreshToken: "rt_1",
       expiresAtMs: currentTime - 10_000,
       identity: { userId: "github:42", login: "robert-crandall", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
     });
 
     let nextStatus: number | "network" = 503;
@@ -220,6 +221,7 @@ describe("relayAuthSession", () => {
       refreshToken: "rt_1",
       expiresAtMs: currentTime - 10_000,
       identity: { userId: "github:42", login: "robert-crandall", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
     });
 
     const refreshStarted = Promise.withResolvers<void>();
@@ -271,6 +273,7 @@ describe("relayAuthSession", () => {
       refreshToken: "rt_1",
       expiresAtMs: currentTime - 10_000,
       identity: { userId: "github:42", login: "robert-crandall", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
     };
     const saveStarted = Promise.withResolvers<void>();
     const releaseSave = Promise.withResolvers<void>();
@@ -365,6 +368,7 @@ describe("relayAuthSession", () => {
       refreshToken: "rt_1",
       expiresAtMs: currentTime - 10_000,
       identity: { userId: "github:42", login: "robert-crandall", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
     };
     const revokedTokens: string[] = [];
     const session = createRelayAuthSession({
@@ -433,6 +437,7 @@ describe("relayAuthSession", () => {
             refreshToken: "rt_1",
             expiresAtMs: currentTime + 900_000,
             identity: { userId: "github:42", login: "robert-crandall", email: null },
+            relayOrigin: "https://relay.crandalls.cloud",
           };
         },
         save: async () => undefined,
@@ -476,6 +481,7 @@ describe("relayAuthSession", () => {
       refreshToken: "rt_1",
       expiresAtMs: currentTime + 30_000,
       identity: { userId: "github:42", login: "robert-crandall", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
     });
     const session = createRelayAuthSession({
       relayUrl: "https://relay.crandalls.cloud",
@@ -691,5 +697,82 @@ describe("relayAuthSession", () => {
       identity: initialSession.identity,
     });
     expect(revokedTokens).toEqual(["rt_aborted"]);
+  });
+
+  it("revokes newly minted refresh tokens without clearing storage when store.load or store.save fails during code exchange", async () => {
+    const currentTime = 1_000_000_000;
+    const newAccess = makeFakeJwt({
+      sub: "github:7",
+      preferred_username: "octocat",
+      exp: Math.floor((currentTime + 900_000) / 1_000),
+    });
+    const revokedTokens: string[] = [];
+    let cleared = false;
+    let saved = false;
+    let mode: "failLoad" | "failSave" = "failLoad";
+    let mintCounter = 0;
+
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-desktop",
+      store: {
+        load: async () => {
+          if (mode === "failLoad") {
+            throw new Error("keychain read failed");
+          }
+          return null;
+        },
+        save: async () => {
+          if (mode === "failSave") {
+            throw new Error("keychain write failed");
+          }
+          saved = true;
+        },
+        clear: async () => {
+          cleared = true;
+        },
+      },
+      now: () => currentTime,
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/v1/auth/token")) {
+          mintCounter += 1;
+          return new Response(
+            JSON.stringify({
+              access_token: newAccess,
+              refresh_token: `rt_minted_${mintCounter}`,
+              expires_in: 900,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (String(input).endsWith("/v1/auth/revoke")) {
+          const params = new URLSearchParams(String(init?.body ?? ""));
+          revokedTokens.push(params.get("token") ?? "");
+          return new Response(null, { status: 204 });
+        }
+        return new Response("unexpected", { status: 500 });
+      },
+    });
+
+    await expect(
+      session.exchangeAuthorizationCode({
+        code: "code_1",
+        redirectUri: "http://127.0.0.1:43210/callback",
+        codeVerifier: "verifier_1",
+      }),
+    ).rejects.toThrow("keychain read failed");
+    expect(saved).toBe(false);
+    expect(cleared).toBe(false);
+
+    mode = "failSave";
+    await expect(
+      session.exchangeAuthorizationCode({
+        code: "code_2",
+        redirectUri: "http://127.0.0.1:43210/callback",
+        codeVerifier: "verifier_2",
+      }),
+    ).rejects.toThrow("keychain write failed");
+    expect(cleared).toBe(false);
+    expect(revokedTokens).toEqual(["rt_minted_1", "rt_minted_2"]);
   });
 });

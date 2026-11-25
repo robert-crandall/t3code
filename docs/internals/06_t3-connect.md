@@ -1,8 +1,9 @@
 # T3 Connect
 
-T3 Connect uses Clerk for cloud identity. The relay manages environment links, bootstrap
-credentials, and managed tunnel allocations. Regular HTTP and WebSocket traffic goes directly from
-clients to the environment's tunnel hostname—the relay Worker is not in the data path.
+T3 Connect uses GitHub OAuth brokered by the relay (`/v1/auth/*`) for cloud identity. The relay
+manages environment links, bootstrap credentials, and managed tunnel allocations. Regular HTTP and
+WebSocket traffic goes directly from clients to the environment's tunnel hostname—the relay Worker
+is not in the data path.
 
 The one forwarded exception is automation webhooks
 ([`HookForwarder.ts`](../../infra/relay/src/hooks/HookForwarder.ts)), which give senders a stable
@@ -11,7 +12,7 @@ traces. Opt-in offline holding stores raw webhook requests in a per-link Durable
 ([`HookInboxObject.ts`](../../infra/relay/src/hooks/HookInboxObject.ts)) rather than Queues or
 Postgres because held requests need per-link ordering, retry timing, and larger payload limits.
 
-Deployment and Clerk configuration live in the [Connect setup runbook](../operations/02_connect-setup.md).
+Deployment and GitHub OAuth configuration live in the [Connect setup runbook](../operations/02_connect-setup.md).
 
 ## The relay is a trusted broker
 
@@ -54,16 +55,17 @@ Deployment and Clerk configuration live in the [Connect setup runbook](../operat
 
 ## T3 Chat plan cap link
 
-T3 Chat uses WorkOS rather than Clerk, so accounts link by user consent via a shared secret. T3 Chat
-owns the link and plan state; the relay stores no copy and queries T3 Chat only when an account hits
-its default cap for a new environment, failing closed to the default cap without disrupting existing
-slots.
+T3 Chat uses WorkOS rather than GitHub OAuth, so accounts link by user consent via a shared secret.
+T3 Chat owns the link and plan state; the relay stores no copy and queries T3 Chat only when an
+account hits its default cap for a new environment, failing closed to the default cap without
+disrupting existing slots.
 
-## OAuth traps
+## OAuth flow details
 
-- Interactive clients use Clerk session-template JWTs; the headless CLI uses a public PKCE OAuth
-  client with no secret. The relay must accept both.
-- Loopback CLI login starts on the hosted `/connect` page so sign-in finishes before Clerk's
-  authorize endpoint (going straight to authorize drops parameters across sign-in redirects).
-- SSH and headless sessions use Clerk's OAuth device authorization grant directly against Clerk's
-  token endpoint, which must stay enabled on the CLI OAuth application.
+- All T3 Connect clients (`t3-cli`, `t3-desktop`, `t3-mobile`) authenticate through the relay's
+  `/v1/auth/*` endpoints using short-lived relay-signed RS256 access tokens and rotating refresh
+  tokens backed by GitHub OAuth.
+- Interactive clients (desktop, mobile, and local CLI) use OAuth 2.0 Authorization Code + PKCE
+  (`/v1/auth/authorize` -> `/v1/auth/github/callback` -> `/v1/auth/token`).
+- SSH and headless CLI sessions use GitHub's device authorization flow proxied through
+  `/v1/auth/device/code` and `/v1/auth/device/token`.

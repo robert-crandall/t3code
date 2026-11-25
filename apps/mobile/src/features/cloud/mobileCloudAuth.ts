@@ -76,7 +76,8 @@ function isStoredSession(value: unknown): value is RelayStoredSession {
   }
   const identity = record.identity as Record<string, unknown>;
   return (
-    (record.relayOrigin === undefined || typeof record.relayOrigin === "string") &&
+    typeof record.relayOrigin === "string" &&
+    record.relayOrigin.length > 0 &&
     typeof identity.userId === "string" &&
     identity.userId.length > 0 &&
     typeof identity.login === "string" &&

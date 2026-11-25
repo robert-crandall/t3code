@@ -1267,6 +1267,10 @@ export const DesktopCloudAuthStateSchema = Schema.Union([
     identity: Schema.Null,
   }),
   Schema.Struct({
+    status: Schema.Literal("unavailable"),
+    identity: Schema.Null,
+  }),
+  Schema.Struct({
     status: Schema.Literal("signedOut"),
     identity: Schema.Null,
   }),

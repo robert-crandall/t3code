@@ -56,7 +56,7 @@ const StoredSessionSchema = Schema.Struct({
     login: Schema.String,
     email: Schema.NullOr(Schema.String),
   }),
-  relayOrigin: Schema.optionalKey(Schema.String),
+  relayOrigin: Schema.String,
 });
 const decodeStoredSessionJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(StoredSessionSchema),
@@ -407,6 +407,7 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
   const startupRetryDelayMs = options.startupRetryDelayMs ?? STARTUP_INIT_RETRY_DELAY_MS;
 
   let currentState: DesktopCloudAuthState = { status: "loading", identity: null };
+  let inFlightStart: Promise<void> | null = null;
   let startupRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let startupRetryAttempted = false;
   let activeSignInAbort: AbortController | null = null;
@@ -465,47 +466,68 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
     }),
   );
 
-  const ensureStarted = async (): Promise<void> => {
+  const ensureStarted = (isScheduledRetry = false): Promise<void> => {
     if (session === null) {
       broadcastState({ status: "signedOut", identity: null });
-      return;
+      return Promise.resolve();
     }
-    try {
-      const initialized = await session.initialize();
-      clearStartupRetryTimer();
-      broadcastState(initialized);
-    } catch (error) {
-      if (disposed) return;
-      const encryptionAvailable = await runEffect(isStrongEncryptionAvailable(safeStorage));
-      if (!encryptionAvailable || startupRetryAttempted) {
+    if (disposed || currentState.status !== "loading") {
+      return Promise.resolve();
+    }
+    if (!isScheduledRetry && startupRetryTimer !== null) {
+      return Promise.resolve();
+    }
+    if (inFlightStart !== null) {
+      return inFlightStart;
+    }
+
+    const run = (async () => {
+      try {
+        const initialized = await session.initialize();
         clearStartupRetryTimer();
+        broadcastState(initialized);
+      } catch (error) {
+        if (disposed || currentState.status !== "loading") return;
+        const encryptionAvailable = await runEffect(isStrongEncryptionAvailable(safeStorage));
+        if (!encryptionAvailable || startupRetryAttempted) {
+          clearStartupRetryTimer();
+          await runEffect(
+            Effect.logWarning(
+              "Could not load persisted desktop cloud auth session; leaving auth unavailable without deleting the session file or saved connections.",
+              { error },
+            ),
+          );
+          if (currentState.status === "loading") {
+            broadcastState({ status: "unavailable", identity: null });
+          }
+          return;
+        }
+        startupRetryAttempted = true;
         await runEffect(
           Effect.logWarning(
-            "Could not load persisted desktop cloud auth session; falling back to signed-out state without deleting the session file.",
+            "Could not initialize persisted desktop cloud auth session; scheduling a retry.",
             { error },
           ),
         );
-        if (currentState.status === "loading") {
-          broadcastState({ status: "signedOut", identity: null });
+        if (startupRetryTimer === null && !disposed) {
+          startupRetryTimer = setTimeout(() => {
+            startupRetryTimer = null;
+            if (!disposed && currentState.status === "loading") {
+              void ensureStarted(true);
+            }
+          }, startupRetryDelayMs);
         }
-        return;
       }
-      startupRetryAttempted = true;
-      await runEffect(
-        Effect.logWarning(
-          "Could not initialize persisted desktop cloud auth session; scheduling a retry.",
-          { error },
-        ),
-      );
-      if (startupRetryTimer === null && !disposed) {
-        startupRetryTimer = setTimeout(() => {
-          startupRetryTimer = null;
-          if (!disposed && currentState.status === "loading") {
-            void ensureStarted();
-          }
-        }, startupRetryDelayMs);
+    })();
+
+    let pending: Promise<void>;
+    pending = run.finally(() => {
+      if (inFlightStart === pending) {
+        inFlightStart = null;
       }
-    }
+    });
+    inFlightStart = pending;
+    return pending;
   };
 
   return DesktopCloudAuth.of({
@@ -517,6 +539,9 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
       return Effect.promise(async () => {
         if (session === null) return null;
         await ensureStarted();
+        if (currentState.status !== "signedIn") {
+          return null;
+        }
         try {
           return await session.getAccessToken(
             tokenOptions?.forceRefresh !== undefined
@@ -532,6 +557,7 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
     signIn: Effect.tryPromise({
       try: async () => {
         clearStartupRetryTimer();
+        startupRetryAttempted = false;
         if (relayUrl === null || session === null) {
           throw new Error("T3 Connect relay URL is not configured in this build.");
         }
@@ -597,6 +623,7 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
     signOut: Effect.tryPromise({
       try: async () => {
         clearStartupRetryTimer();
+        startupRetryAttempted = false;
         abortActiveSignIn();
         if (session !== null) {
           await session.signOut();
