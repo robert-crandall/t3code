@@ -1,6 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off globalDateInEffect:off - Tests exercise the real loopback OAuth callback listener against a mocked relay fetch.
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { DesktopCloudAuthState } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -152,9 +151,6 @@ describe("DesktopCloudAuth", () => {
           Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
             stateDir,
           } as DesktopEnvironment.DesktopEnvironment["Service"]),
-          Layer.succeed(HostProcess.Environment, {
-            T3CODE_RELAY_URL: "https://relay.crandalls.cloud",
-          }),
           Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
           Layer.succeed(ElectronShell.ElectronShell, shell),
           Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
@@ -162,7 +158,10 @@ describe("DesktopCloudAuth", () => {
 
         const cloudAuthLayer = Layer.effect(
           DesktopCloudAuth.DesktopCloudAuth,
-          DesktopCloudAuth.make({ fetch: mockFetch }),
+          DesktopCloudAuth.make({
+            relayUrl: "https://relay.crandalls.cloud",
+            fetch: mockFetch,
+          }),
         ).pipe(Layer.provide(baseLayer));
 
         // First instance: pre-start state is loading and safeStorage has not been queried.
@@ -265,7 +264,6 @@ describe("DesktopCloudAuth", () => {
             Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
               stateDir,
             } as DesktopEnvironment.DesktopEnvironment["Service"]),
-            Layer.succeed(HostProcess.Environment, {}),
             Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
             Layer.succeed(ElectronShell.ElectronShell, shell),
             Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
@@ -308,7 +306,6 @@ describe("DesktopCloudAuth", () => {
             Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
               stateDir,
             } as DesktopEnvironment.DesktopEnvironment["Service"]),
-            Layer.succeed(HostProcess.Environment, {}),
             Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
             Layer.succeed(ElectronShell.ElectronShell, shell),
             Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
@@ -351,7 +348,6 @@ describe("DesktopCloudAuth", () => {
             Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
               stateDir,
             } as DesktopEnvironment.DesktopEnvironment["Service"]),
-            Layer.succeed(HostProcess.Environment, {}),
             Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
             Layer.succeed(ElectronShell.ElectronShell, shell),
             Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
@@ -451,7 +447,6 @@ describe("DesktopCloudAuth", () => {
               Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
                 stateDir,
               } as DesktopEnvironment.DesktopEnvironment["Service"]),
-              Layer.succeed(HostProcess.Environment, {}),
               Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, transientSafeStorage),
               Layer.succeed(ElectronShell.ElectronShell, shell),
               Layer.succeed(ElectronWindow.ElectronWindow, recoverWindow),
@@ -531,7 +526,6 @@ describe("DesktopCloudAuth", () => {
               Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
                 stateDir,
               } as DesktopEnvironment.DesktopEnvironment["Service"]),
-              Layer.succeed(HostProcess.Environment, {}),
               Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, unlockableSafeStorage),
               Layer.succeed(ElectronShell.ElectronShell, countingShell),
               Layer.succeed(ElectronWindow.ElectronWindow, fallbackWindow),
@@ -591,7 +585,6 @@ describe("DesktopCloudAuth", () => {
             Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
               stateDir,
             } as DesktopEnvironment.DesktopEnvironment["Service"]),
-            Layer.succeed(HostProcess.Environment, {}),
             Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
             Layer.succeed(ElectronShell.ElectronShell, shell),
             Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),

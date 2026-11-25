@@ -21,7 +21,6 @@ import {
   CONNECT_LOOPBACK_CALLBACK_PATH,
   connectLoopbackRedirectUri,
 } from "@t3tools/shared/connectAuth";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
@@ -93,13 +92,11 @@ export class DesktopCloudAuth extends Context.Service<
 >()("@t3tools/desktop/app/DesktopCloudAuth") {}
 
 function resolveDesktopRelayUrl(
-  env: Readonly<Record<string, string | undefined>>,
   buildRelayUrl: string | undefined = typeof __T3CODE_BUILD_RELAY_URL__ === "undefined"
     ? undefined
     : __T3CODE_BUILD_RELAY_URL__,
 ): string | null {
-  const configured = env.T3CODE_RELAY_URL ?? buildRelayUrl;
-  return configured ? normalizeSecureRelayUrl(configured) : null;
+  return buildRelayUrl ? normalizeSecureRelayUrl(buildRelayUrl) : null;
 }
 
 function escapeHtml(value: string): string {
@@ -387,7 +384,6 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
   options: DesktopCloudAuthOptions = {},
 ) {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  const env = yield* HostProcess.Environment;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
@@ -401,7 +397,7 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
       ? options.relayUrl
         ? normalizeSecureRelayUrl(options.relayUrl)
         : null
-      : resolveDesktopRelayUrl(env);
+      : resolveDesktopRelayUrl();
   const sessionFilePath = path.join(environment.stateDir, "cloud-auth", "session.json");
   const signInTimeoutMs = options.signInTimeoutMs ?? OAUTH_SIGN_IN_TIMEOUT_MS;
   const startupRetryDelayMs = options.startupRetryDelayMs ?? STARTUP_INIT_RETRY_DELAY_MS;

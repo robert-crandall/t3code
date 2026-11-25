@@ -246,6 +246,12 @@ it("rejects invalid custom iOS bundle IDs, team IDs, schemes, relying parties, a
     "T3CODE_MOBILE_SCHEME",
   );
   await expect(
+    loadConfig("production", {
+      T3CODE_RELAY_URL: "https://relay.crandalls.cloud",
+      T3CODE_MOBILE_SCHEME: "t3code-team",
+    }),
+  ).rejects.toThrow("T3CODE_MOBILE_SCHEME must be one of");
+  await expect(
     loadConfig("production", { T3CODE_IOS_RELYING_PARTY: "https://auth.example.com" }),
   ).rejects.toThrow("T3CODE_IOS_RELYING_PARTY");
   await expect(loadConfig("production", { T3CODE_IOS_BUILD_NUMBER: "1.0-beta" })).rejects.toThrow(

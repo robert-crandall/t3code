@@ -1,5 +1,6 @@
 import type { ExpoConfig } from "expo/config";
 
+import { ALLOWED_MOBILE_OAUTH_SCHEMES } from "../../packages/shared/src/connectAuth.ts";
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
@@ -60,6 +61,16 @@ if (customIosTeamId && !APPLE_TEAM_ID_PATTERN.test(customIosTeamId)) {
 
 if (customScheme && !URL_SCHEME_PATTERN.test(customScheme)) {
   throw new Error("T3CODE_MOBILE_SCHEME must be a lowercase URL scheme such as t3code-private.");
+}
+
+if (
+  relayUrl &&
+  customScheme &&
+  !(ALLOWED_MOBILE_OAUTH_SCHEMES as readonly string[]).includes(customScheme)
+) {
+  throw new Error(
+    `T3CODE_MOBILE_SCHEME must be one of ${ALLOWED_MOBILE_OAUTH_SCHEMES.join(", ")} when T3CODE_RELAY_URL is configured.`,
+  );
 }
 
 if (customRelyingParty && !IOS_BUNDLE_IDENTIFIER_PATTERN.test(customRelyingParty)) {

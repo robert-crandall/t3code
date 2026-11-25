@@ -1,3 +1,4 @@
+import { ALLOWED_MOBILE_OAUTH_SCHEMES } from "@t3tools/shared/connectAuth";
 import { normalizeRelayIssuer } from "@t3tools/shared/relayJwt";
 import * as Digest from "effect/crypto/Digest";
 import * as Mac from "effect/crypto/Mac";
@@ -31,8 +32,9 @@ const SUPPORTED_OAUTH_CLIENT_IDS = new Set<string>([
   DESKTOP_OAUTH_CLIENT_ID,
   MOBILE_OAUTH_CLIENT_ID,
 ]);
-const ALLOWED_MOBILE_REDIRECT_URI_PATTERN =
-  /^(t3code|t3code-dev|t3code-preview|t3code-private):\/\/oauth\/callback$/;
+const ALLOWED_MOBILE_REDIRECT_URIS = new Set(
+  ALLOWED_MOBILE_OAUTH_SCHEMES.map((scheme) => `${scheme}://oauth/callback`),
+);
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 const OAUTH_NONCE_COOKIE = "__Host-t3_oauth_nonce";
 const DEFAULT_GITHUB_OAUTH_BASE_URL = "https://github.com";
@@ -99,7 +101,7 @@ export function isSupportedOAuthClientId(clientId: string): boolean {
 
 export function isAllowedClientRedirectUri(clientId: string, redirectUri: string): boolean {
   if (clientId === MOBILE_OAUTH_CLIENT_ID) {
-    return ALLOWED_MOBILE_REDIRECT_URI_PATTERN.test(redirectUri);
+    return ALLOWED_MOBILE_REDIRECT_URIS.has(redirectUri);
   }
   if (clientId !== CLI_OAUTH_CLIENT_ID && clientId !== DESKTOP_OAUTH_CLIENT_ID) {
     return false;
