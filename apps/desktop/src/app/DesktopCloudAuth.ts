@@ -33,6 +33,7 @@ import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 declare const __T3CODE_BUILD_RELAY_URL__: string | undefined;
 
 const OAUTH_SIGN_IN_TIMEOUT_MS = 5 * 60_000;
+const STARTUP_INIT_RETRY_DELAY_MS = 2_000;
 const ENCRYPTED_SESSION_VERSION = 1;
 
 const EncryptedSessionDocumentSchema = Schema.Struct({
@@ -55,6 +56,7 @@ const StoredSessionSchema = Schema.Struct({
     login: Schema.String,
     email: Schema.NullOr(Schema.String),
   }),
+  relayOrigin: Schema.optionalKey(Schema.String),
 });
 const decodeStoredSessionJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(StoredSessionSchema),
@@ -74,6 +76,7 @@ export interface DesktopCloudAuthOptions {
   readonly relayUrl?: string | null;
   readonly fetch?: typeof fetch;
   readonly signInTimeoutMs?: number;
+  readonly startupRetryDelayMs?: number;
 }
 
 export class DesktopCloudAuth extends Context.Service<
@@ -401,14 +404,23 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
       : resolveDesktopRelayUrl(env);
   const sessionFilePath = path.join(environment.stateDir, "cloud-auth", "session.json");
   const signInTimeoutMs = options.signInTimeoutMs ?? OAUTH_SIGN_IN_TIMEOUT_MS;
+  const startupRetryDelayMs = options.startupRetryDelayMs ?? STARTUP_INIT_RETRY_DELAY_MS;
 
   let currentState: DesktopCloudAuthState = { status: "loading", identity: null };
-  let session: RelayAuthSession | null = null;
-  let unsubscribeSession: (() => void) | null = null;
-  let startPromise: Promise<void> | null = null;
+  let startupRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let startupRetryAttempted = false;
   let activeSignInAbort: AbortController | null = null;
+  let disposed = false;
+
+  const clearStartupRetryTimer = () => {
+    if (startupRetryTimer !== null) {
+      clearTimeout(startupRetryTimer);
+      startupRetryTimer = null;
+    }
+  };
 
   const broadcastState = (next: DesktopCloudAuthState) => {
+    if (disposed) return;
     currentState = next;
     void runEffect(
       electronWindow.sendAll(IpcChannels.CLOUD_AUTH_STATE_CHANNEL, next).pipe(Effect.ignore),
@@ -422,57 +434,78 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
     }
   };
 
+  const session: RelayAuthSession | null =
+    relayUrl !== null
+      ? createRelayAuthSession({
+          relayUrl,
+          clientId: "t3-desktop",
+          store: makeEncryptedTokenStore({
+            fileSystem,
+            path,
+            safeStorage,
+            sessionFilePath,
+            runEffect,
+          }),
+          ...(options.fetch ? { fetch: options.fetch } : {}),
+        })
+      : null;
+
+  const unsubscribeSession =
+    session?.subscribe((snapshot) => {
+      clearStartupRetryTimer();
+      broadcastState(snapshot);
+    }) ?? null;
+
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
+      disposed = true;
+      clearStartupRetryTimer();
       abortActiveSignIn();
       unsubscribeSession?.();
-      unsubscribeSession = null;
     }),
   );
 
   const ensureStarted = async (): Promise<void> => {
-    if (startPromise !== null) {
-      await startPromise;
+    if (session === null) {
+      broadcastState({ status: "signedOut", identity: null });
       return;
     }
-    startPromise = (async () => {
-      if (relayUrl === null) {
-        broadcastState({ status: "signedOut", identity: null });
-        return;
-      }
-      if (session === null) {
-        const store = makeEncryptedTokenStore({
-          fileSystem,
-          path,
-          safeStorage,
-          sessionFilePath,
-          runEffect,
-        });
-        const created = createRelayAuthSession({
-          relayUrl,
-          clientId: "t3-desktop",
-          store,
-          ...(options.fetch ? { fetch: options.fetch } : {}),
-        });
-        session = created;
-        unsubscribeSession = created.subscribe((snapshot) => {
-          broadcastState(snapshot);
-        });
-      }
-      try {
-        const initialized = await session.initialize();
-        broadcastState(initialized);
-      } catch (error) {
-        startPromise = null;
+    try {
+      const initialized = await session.initialize();
+      clearStartupRetryTimer();
+      broadcastState(initialized);
+    } catch (error) {
+      if (disposed) return;
+      const encryptionAvailable = await runEffect(isStrongEncryptionAvailable(safeStorage));
+      if (!encryptionAvailable || startupRetryAttempted) {
+        clearStartupRetryTimer();
         await runEffect(
           Effect.logWarning(
-            "Could not initialize persisted desktop cloud auth session; keeping loading state for retry.",
+            "Could not load persisted desktop cloud auth session; falling back to signed-out state without deleting the session file.",
             { error },
           ),
         );
+        if (currentState.status === "loading") {
+          broadcastState({ status: "signedOut", identity: null });
+        }
+        return;
       }
-    })();
-    await startPromise;
+      startupRetryAttempted = true;
+      await runEffect(
+        Effect.logWarning(
+          "Could not initialize persisted desktop cloud auth session; scheduling a retry.",
+          { error },
+        ),
+      );
+      if (startupRetryTimer === null && !disposed) {
+        startupRetryTimer = setTimeout(() => {
+          startupRetryTimer = null;
+          if (!disposed && currentState.status === "loading") {
+            void ensureStarted();
+          }
+        }, startupRetryDelayMs);
+      }
+    }
   };
 
   return DesktopCloudAuth.of({
@@ -482,19 +515,23 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
 
     getAccessToken: Effect.fn("DesktopCloudAuth.getAccessToken")(function (tokenOptions) {
       return Effect.promise(async () => {
-        await ensureStarted();
         if (session === null) return null;
-        return session.getAccessToken(
-          tokenOptions?.forceRefresh !== undefined
-            ? { forceRefresh: tokenOptions.forceRefresh }
-            : undefined,
-        );
+        await ensureStarted();
+        try {
+          return await session.getAccessToken(
+            tokenOptions?.forceRefresh !== undefined
+              ? { forceRefresh: tokenOptions.forceRefresh }
+              : undefined,
+          );
+        } catch {
+          return null;
+        }
       });
     }),
 
     signIn: Effect.tryPromise({
       try: async () => {
-        await ensureStarted();
+        clearStartupRetryTimer();
         if (relayUrl === null || session === null) {
           throw new Error("T3 Connect relay URL is not configured in this build.");
         }
@@ -559,8 +596,8 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
 
     signOut: Effect.tryPromise({
       try: async () => {
+        clearStartupRetryTimer();
         abortActiveSignIn();
-        await ensureStarted();
         if (session !== null) {
           await session.signOut();
           return session.getSnapshot();

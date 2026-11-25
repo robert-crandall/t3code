@@ -1223,8 +1223,7 @@ export function resolveMacPasskeySigningConfiguration(
     throw new MissingMacPasskeyProvisioningProfileError();
   }
 
-  const configuredRpDomains =
-    env.T3CODE_PASSKEY_RP_DOMAINS?.trim() || env.T3CODE_CLERK_PASSKEY_RP_DOMAINS?.trim();
+  const configuredRpDomains = env.T3CODE_PASSKEY_RP_DOMAINS?.trim();
   const uniqueRpDomains = configuredRpDomains
     ? [...new Set(configuredRpDomains.split(",").map(normalizePasskeyRpDomain))]
     : [];

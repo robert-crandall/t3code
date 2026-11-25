@@ -384,8 +384,20 @@ describe("OAuthSessions", () => {
         expect(getForUpdateCount()).toBeGreaterThanOrEqual(3);
 
         // Retrying the previous token with small cross-worker clock skew slightly behind rotatedAt
-        // still succeeds within the rotation grace window instead of falsely revoking the session.
+        // still succeeds within the rotation grace window on both inspectForRefresh and rotate.
         yield* TestClock.setTime(startMs - 500);
+        const inspectedSkewedGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(inspectedSkewedGrace).toMatchObject({
+          _tag: "Ready",
+          githubAccessToken: "gho_concurrent_test",
+        });
+
         const skewedGrace = yield* Effect.gen(function* () {
           const sessions = yield* OAuthSessions.OAuthSessions;
           return yield* sessions.rotate({
@@ -395,8 +407,21 @@ describe("OAuthSessions", () => {
         }).pipe(Effect.provide(layerAuth));
         expect(skewedGrace).toEqual(first);
 
-        // Retrying the previous token 30s later (still inside the 60s grace window) still returns R1.
+        // Retrying the previous token 30s later (still inside the 60s grace window) succeeds on
+        // inspectForRefresh and returns R1 on rotate.
         yield* TestClock.setTime(startMs + 30_000);
+        const inspectedWithinGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(inspectedWithinGrace).toMatchObject({
+          _tag: "Ready",
+          githubAccessToken: "gho_concurrent_test",
+        });
+
         const withinGrace = yield* Effect.gen(function* () {
           const sessions = yield* OAuthSessions.OAuthSessions;
           return yield* sessions.rotate({
@@ -426,6 +451,44 @@ describe("OAuthSessions", () => {
           });
         }).pipe(Effect.provide(layerAuth));
         expect(postReplay).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // Verify inspectForRefresh also revokes on post-grace replay on a fresh session.
+        const secondSession = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.create({
+            userId: "github:43",
+            githubLogin: "octocat-2",
+            clientId: "t3-cli",
+            githubAccessToken: "gho_inspect_grace_test",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        if (secondSession._tag !== "Created") return;
+        const rotatedSecond = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.rotate({
+            refreshToken: secondSession.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        if (rotatedSecond._tag !== "Rotated") return;
+
+        yield* TestClock.setTime(startMs + 125_000);
+        const expiredInspect = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: secondSession.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(expiredInspect).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+        const afterExpiredInspect = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.inspectForRefresh({
+            refreshToken: rotatedSecond.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(afterExpiredInspect).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

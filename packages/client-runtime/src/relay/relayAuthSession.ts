@@ -15,6 +15,7 @@ export interface RelayStoredSession {
   readonly refreshToken: string;
   readonly expiresAtMs: number;
   readonly identity: RelayAuthIdentity;
+  readonly relayOrigin?: string | undefined;
 }
 
 export type RelayAuthSnapshot =
@@ -65,8 +66,23 @@ export interface RelayAccessTokenClaims {
 }
 
 const DEFAULT_REFRESH_MARGIN_MS = 60_000;
+const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
 const REVOKE_REQUEST_TIMEOUT_MS = 5_000;
 const FALLBACK_ACCESS_TOKEN_TTL_MS = 15 * 60_000;
+
+function createRequestSignal(
+  timeoutMs: number,
+  externalSignal?: AbortSignal,
+): AbortSignal | undefined {
+  const timeoutSignal =
+    typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+  if (externalSignal && timeoutSignal) {
+    return typeof AbortSignal.any === "function"
+      ? AbortSignal.any([externalSignal, timeoutSignal])
+      : externalSignal;
+  }
+  return externalSignal ?? timeoutSignal;
+}
 
 /**
  * Decodes unverified JWT claims for client display and expiry scheduling.
@@ -172,6 +188,7 @@ function snapshotEquals(a: RelayAuthSnapshot, b: RelayAuthSnapshot): boolean {
 function buildStoredSession(
   tokenResponse: RelayTokenEndpointResponse,
   nowMs: number,
+  relayOrigin: string,
   fallbackIdentity?: RelayAuthIdentity,
 ): RelayStoredSession {
   const claims = parseRelayAccessTokenClaims(tokenResponse.access_token);
@@ -197,6 +214,7 @@ function buildStoredSession(
     refreshToken: tokenResponse.refresh_token,
     expiresAtMs,
     identity,
+    relayOrigin,
   };
 }
 
@@ -211,6 +229,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
 
   let snapshot: RelayAuthSnapshot = { status: "loading", identity: null };
   let cachedSession: RelayStoredSession | null = null;
+  let hasUnsavedCache = false;
   let initialized = false;
   let initPromise: Promise<RelayAuthSnapshot> | null = null;
   let refreshPromise: Promise<string | null> | null = null;
@@ -219,6 +238,30 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
   // Incremented on every sign-in or sign-out so stale in-flight loads/exchanges/refreshes cannot overwrite newer state.
   let generation = 0;
   const listeners = new Set<(next: RelayAuthSnapshot) => void>();
+
+  const matchesRelayOrigin = (candidate: RelayStoredSession | null): RelayStoredSession | null => {
+    if (candidate === null) return null;
+    if (candidate.relayOrigin !== undefined && candidate.relayOrigin !== origin) {
+      return null;
+    }
+    return candidate;
+  };
+
+  const revokeRefreshToken = async (refreshToken: string): Promise<void> => {
+    if (!refreshToken) return;
+    const signal = createRequestSignal(REVOKE_REQUEST_TIMEOUT_MS);
+    await fetchImpl(`${origin}/v1/auth/revoke`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: options.clientId,
+        token: refreshToken,
+      }).toString(),
+      ...(signal ? { signal } : {}),
+    }).catch(() => undefined);
+  };
 
   const withStorageLock = async <T>(fn: () => Promise<T>): Promise<T> => {
     const previous = storageQueue;
@@ -248,12 +291,13 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
     const initGeneration = generation;
     initPromise = (async () => {
       try {
-        const stored = await options.store.load();
+        const stored = matchesRelayOrigin(await options.store.load());
         if (generation !== initGeneration) {
           return snapshot;
         }
         initialized = true;
         cachedSession = stored;
+        hasUnsavedCache = false;
         setSnapshot(
           stored !== null
             ? { status: "signedIn", identity: stored.identity }
@@ -274,6 +318,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       throw new Error("Sign-in was canceled.");
     }
     const attemptGeneration = generation;
+    const requestSignal = createRequestSignal(TOKEN_REQUEST_TIMEOUT_MS, input.signal);
     const response = await fetchImpl(`${origin}/v1/auth/token`, {
       method: "POST",
       headers: {
@@ -287,7 +332,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         redirect_uri: input.redirectUri,
         code_verifier: input.codeVerifier,
       }).toString(),
-      ...(input.signal ? { signal: input.signal } : {}),
+      ...(requestSignal ? { signal: requestSignal } : {}),
     });
     const body = await response.json().catch(() => null);
     if (!response.ok) {
@@ -300,34 +345,52 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       throw new Error(description);
     }
     const parsed = parseTokenResponse(body);
-    const nextSession = buildStoredSession(parsed, now());
-    return withStorageLock(async () => {
+    const nextSession = buildStoredSession(parsed, now(), origin);
+    const discardError = await withStorageLock(async (): Promise<Error | null> => {
       if (input.signal?.aborted) {
-        throw new Error("Sign-in was canceled.");
+        return new Error("Sign-in was canceled.");
       }
       if (generation !== attemptGeneration) {
-        throw new Error("Sign-in was superseded or signed out.");
+        return new Error("Sign-in was superseded or signed out.");
       }
+      const previousDiskSession = await options.store.load().catch(() => null);
       await options.store.save(nextSession);
       if (input.signal?.aborted || generation !== attemptGeneration) {
-        throw new Error("Sign-in was superseded or signed out.");
+        if (previousDiskSession !== null) {
+          await options.store.save(previousDiskSession).catch(() => undefined);
+        } else {
+          await options.store.clear().catch(() => undefined);
+        }
+        return new Error(
+          input.signal?.aborted ? "Sign-in was canceled." : "Sign-in was superseded or signed out.",
+        );
       }
       generation += 1;
       initialized = true;
       cachedSession = nextSession;
+      hasUnsavedCache = false;
       setSnapshot({ status: "signedIn", identity: nextSession.identity }, true);
-      return nextSession.identity;
+      return null;
     });
+    if (discardError !== null) {
+      await revokeRefreshToken(nextSession.refreshToken);
+      throw discardError;
+    }
+    return nextSession.identity;
   };
 
   const refresh = async (forceRefresh: boolean): Promise<string | null> => {
     const attemptGeneration = generation;
-    const stored = (await options.store.load()) ?? cachedSession;
+    const stored =
+      hasUnsavedCache && cachedSession !== null
+        ? cachedSession
+        : (matchesRelayOrigin(await options.store.load().catch(() => null)) ?? cachedSession);
     if (generation !== attemptGeneration) {
       return cachedSession?.accessToken ?? null;
     }
     if (stored === null) {
       cachedSession = null;
+      hasUnsavedCache = false;
       setSnapshot({ status: "signedOut", identity: null });
       return null;
     }
@@ -338,6 +401,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
     }
 
     const attemptedRefreshToken = stored.refreshToken;
+    const requestSignal = createRequestSignal(TOKEN_REQUEST_TIMEOUT_MS);
     let response: Response;
     try {
       response = await fetchImpl(`${origin}/v1/auth/token`, {
@@ -351,6 +415,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
           client_id: options.clientId,
           refresh_token: attemptedRefreshToken,
         }).toString(),
+        ...(requestSignal ? { signal: requestSignal } : {}),
       });
     } catch {
       return stored.expiresAtMs > now() ? stored.accessToken : null;
@@ -363,21 +428,24 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       } catch {
         return stored.expiresAtMs > now() ? stored.accessToken : null;
       }
-      const nextSession = buildStoredSession(parsed, now(), stored.identity);
+      const nextSession = buildStoredSession(parsed, now(), origin, stored.identity);
       return withStorageLock(async () => {
         if (generation !== attemptGeneration) {
           return null;
         }
+        let persisted = true;
         try {
           await options.store.save(nextSession);
         } catch {
           // Retain rotated credentials in memory even if durable persistence fails so a later
           // refresh does not replay the superseded refresh token and revoke the session.
+          persisted = false;
         }
         if (generation !== attemptGeneration) {
           return null;
         }
         cachedSession = nextSession;
+        hasUnsavedCache = !persisted;
         // Always notify on successful refresh so failed cloud-account activations retry with the fresh token.
         setSnapshot({ status: "signedIn", identity: nextSession.identity }, true);
         return nextSession.accessToken;
@@ -389,7 +457,9 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         if (generation !== attemptGeneration) {
           return null;
         }
-        const latestStored = await options.store.load().catch(() => null);
+        const latestStored = hasUnsavedCache
+          ? null
+          : matchesRelayOrigin(await options.store.load().catch(() => null));
         if (generation !== attemptGeneration) {
           return null;
         }
@@ -400,6 +470,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
           return latestStored.expiresAtMs > now() ? latestStored.accessToken : null;
         }
         cachedSession = null;
+        hasUnsavedCache = false;
         await options.store.clear().catch(() => undefined);
         if (generation === attemptGeneration) {
           setSnapshot({ status: "signedOut", identity: null });
@@ -451,8 +522,9 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (generation !== signOutGeneration) {
         return;
       }
-      previous = cachedSession ?? (await options.store.load().catch(() => null));
+      previous = cachedSession ?? matchesRelayOrigin(await options.store.load().catch(() => null));
       cachedSession = null;
+      hasUnsavedCache = false;
       try {
         await options.store.clear();
       } catch (error) {
@@ -465,21 +537,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
     }
 
     if (previous !== null && (previous as RelayStoredSession).refreshToken) {
-      const signal =
-        typeof AbortSignal.timeout === "function"
-          ? AbortSignal.timeout(REVOKE_REQUEST_TIMEOUT_MS)
-          : undefined;
-      await fetchImpl(`${origin}/v1/auth/revoke`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({
-          client_id: options.clientId,
-          token: (previous as RelayStoredSession).refreshToken,
-        }).toString(),
-        ...(signal ? { signal } : {}),
-      }).catch(() => undefined);
+      await revokeRefreshToken((previous as RelayStoredSession).refreshToken);
     }
 
     if (clearError !== null) {

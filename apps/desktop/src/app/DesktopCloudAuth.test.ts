@@ -367,4 +367,212 @@ describe("DesktopCloudAuth", () => {
       }).pipe(Effect.scoped, Effect.provide(layer));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  it.effect(
+    "retries transient startup decryption failures once and falls back to signedOut without deleting session.json when retries fail",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const stateDir = yield* fileSystem.makeTempDirectoryScoped();
+        const sessionDir = path.join(stateDir, "cloud-auth");
+        const sessionPath = path.join(sessionDir, "session.json");
+        yield* fileSystem.makeDirectory(sessionDir, { recursive: true });
+
+        const accessToken = makeJwt({
+          sub: "gh_42",
+          preferred_username: "robert-crandall",
+          email: "robert@example.com",
+          exp: 4_102_444_800,
+        });
+        const storedPayload = JSON.stringify({
+          accessToken,
+          refreshToken: "rt_retry_test",
+          expiresAtMs: 4_102_444_800_000,
+          identity: { userId: "gh_42", login: "robert-crandall", email: "robert@example.com" },
+          relayOrigin: "https://relay.crandalls.cloud",
+        });
+        yield* fileSystem.writeFileString(
+          sessionPath,
+          JSON.stringify({
+            version: 1,
+            encryptedSession: Buffer.from(`enc:${storedPayload}`, "utf8").toString("base64"),
+          }),
+        );
+
+        const recoveredBroadcast = Promise.withResolvers<DesktopCloudAuthState>();
+        const recoverWindow = {
+          sendAll: (channel: string, payload: unknown) =>
+            Effect.sync(() => {
+              if (channel === IpcChannels.CLOUD_AUTH_STATE_CHANNEL) {
+                recoveredBroadcast.resolve(payload as DesktopCloudAuthState);
+              }
+            }),
+          currentMainOrFirst: Effect.succeedNone,
+          reveal: () => Effect.void,
+        } as unknown as ElectronWindow.ElectronWindow["Service"];
+        const shell = ElectronShell.ElectronShell.of({
+          openExternal: () => Effect.succeed(true),
+          openSystemSettings: () => Effect.succeed(false),
+          copyText: () => Effect.void,
+        });
+
+        // Case 1: Keychain fails once, succeeds on scheduled retry -> hydrates signedIn.
+        let failDecryptRemaining = 1;
+        const transientSafeStorage = ElectronSafeStorage.ElectronSafeStorage.of({
+          isEncryptionAvailable: Effect.succeed(true),
+          selectedStorageBackend: Effect.succeedNone,
+          encryptString: (plaintext) =>
+            Effect.succeed(new Uint8Array(Buffer.from(`enc:${plaintext}`, "utf8"))),
+          decryptString: (encrypted) => {
+            if (failDecryptRemaining > 0) {
+              failDecryptRemaining -= 1;
+              return Effect.fail(
+                new ElectronSafeStorage.ElectronSafeStorageDecryptError({
+                  cause: new Error("keychain temporarily locked"),
+                }),
+              );
+            }
+            const text = Buffer.from(encrypted).toString("utf8");
+            return Effect.succeed(text.slice(4));
+          },
+        });
+
+        const recoverLayer = Layer.effect(
+          DesktopCloudAuth.DesktopCloudAuth,
+          DesktopCloudAuth.make({
+            relayUrl: "https://relay.crandalls.cloud",
+            startupRetryDelayMs: 10,
+          }),
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+                stateDir,
+              } as DesktopEnvironment.DesktopEnvironment["Service"]),
+              Layer.succeed(HostProcess.Environment, {}),
+              Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, transientSafeStorage),
+              Layer.succeed(ElectronShell.ElectronShell, shell),
+              Layer.succeed(ElectronWindow.ElectronWindow, recoverWindow),
+            ),
+          ),
+        );
+
+        yield* Effect.gen(function* () {
+          const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
+          yield* auth.start;
+          // Initial failure schedules retry while staying loading briefly.
+          assert.deepStrictEqual(yield* auth.getState, { status: "loading", identity: null });
+          const nextState = yield* Effect.promise(() => recoveredBroadcast.promise);
+          assert.deepStrictEqual(nextState, {
+            status: "signedIn",
+            identity: { userId: "gh_42", login: "robert-crandall", email: "robert@example.com" },
+          });
+          assert.deepStrictEqual(yield* auth.getState, nextState);
+        }).pipe(Effect.scoped, Effect.provide(recoverLayer));
+
+        // Case 2: Keychain stays failing -> transitions to signedOut, preserves session.json, getAccessToken returns null.
+        const fallbackBroadcast = Promise.withResolvers<DesktopCloudAuthState>();
+        const fallbackWindow = {
+          sendAll: (channel: string, payload: unknown) =>
+            Effect.sync(() => {
+              if (channel === IpcChannels.CLOUD_AUTH_STATE_CHANNEL) {
+                fallbackBroadcast.resolve(payload as DesktopCloudAuthState);
+              }
+            }),
+          currentMainOrFirst: Effect.succeedNone,
+          reveal: () => Effect.void,
+        } as unknown as ElectronWindow.ElectronWindow["Service"];
+        const alwaysFailSafeStorage = ElectronSafeStorage.ElectronSafeStorage.of({
+          isEncryptionAvailable: Effect.succeed(true),
+          selectedStorageBackend: Effect.succeedNone,
+          encryptString: (plaintext) =>
+            Effect.succeed(new Uint8Array(Buffer.from(`enc:${plaintext}`, "utf8"))),
+          decryptString: () =>
+            Effect.fail(
+              new ElectronSafeStorage.ElectronSafeStorageDecryptError({
+                cause: new Error("keychain locked"),
+              }),
+            ),
+        });
+
+        const fallbackLayer = Layer.effect(
+          DesktopCloudAuth.DesktopCloudAuth,
+          DesktopCloudAuth.make({
+            relayUrl: "https://relay.crandalls.cloud",
+            startupRetryDelayMs: 10,
+          }),
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+                stateDir,
+              } as DesktopEnvironment.DesktopEnvironment["Service"]),
+              Layer.succeed(HostProcess.Environment, {}),
+              Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, alwaysFailSafeStorage),
+              Layer.succeed(ElectronShell.ElectronShell, shell),
+              Layer.succeed(ElectronWindow.ElectronWindow, fallbackWindow),
+            ),
+          ),
+        );
+
+        yield* Effect.gen(function* () {
+          const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
+          yield* auth.start;
+          const nextState = yield* Effect.promise(() => fallbackBroadcast.promise);
+          assert.deepStrictEqual(nextState, { status: "signedOut", identity: null });
+          assert.deepStrictEqual(yield* auth.getState, { status: "signedOut", identity: null });
+          assert.isNull(yield* auth.getAccessToken());
+          assert.isTrue(yield* fileSystem.exists(sessionPath));
+        }).pipe(Effect.scoped, Effect.provide(fallbackLayer));
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("fails with a timeout when the loopback browser callback never arrives", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const stateDir = yield* fileSystem.makeTempDirectoryScoped();
+      const { service: safeStorage } = makeFakeSafeStorage(true);
+      const electronWindow = {
+        sendAll: () => Effect.void,
+        currentMainOrFirst: Effect.succeedNone,
+        reveal: () => Effect.void,
+      } as unknown as ElectronWindow.ElectronWindow["Service"];
+      const shell = ElectronShell.ElectronShell.of({
+        openExternal: () => Effect.succeed(true),
+        openSystemSettings: () => Effect.succeed(false),
+        copyText: () => Effect.void,
+      });
+
+      const layer = Layer.effect(
+        DesktopCloudAuth.DesktopCloudAuth,
+        DesktopCloudAuth.make({
+          relayUrl: "https://relay.crandalls.cloud",
+          signInTimeoutMs: 50,
+        }),
+      ).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+              stateDir,
+            } as DesktopEnvironment.DesktopEnvironment["Service"]),
+            Layer.succeed(HostProcess.Environment, {}),
+            Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
+            Layer.succeed(ElectronShell.ElectronShell, shell),
+            Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
+        yield* auth.start;
+        const exit = yield* Effect.exit(auth.signIn);
+        assert.isTrue(Exit.isFailure(exit));
+      }).pipe(Effect.scoped, Effect.provide(layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
