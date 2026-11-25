@@ -139,28 +139,12 @@ function toCloudAccountSourceSnapshot(snapshot: RelayAuthSnapshot): CloudAccount
 export function createMobileCloudAuth(
   dependencies: MobileCloudAuthDependencies,
 ): MobileCloudAuthController {
-  let refreshLockTail: Promise<void> = Promise.resolve();
-  const withRefreshLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    const previous = refreshLockTail;
-    let release!: () => void;
-    refreshLockTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
-  };
-
   const session: RelayAuthSession = createRelayAuthSession({
     relayUrl: dependencies.relayUrl,
     clientId: MOBILE_OAUTH_CLIENT_ID,
     store: dependencies.store ?? createSecureStoreRelayTokenStore(),
     ...(dependencies.fetch ? { fetch: dependencies.fetch } : {}),
     ...(dependencies.now ? { now: dependencies.now } : {}),
-    withRefreshLock,
   });
 
   const getRandomBytes = dependencies.getRandomBytes ?? ExpoCrypto.getRandomBytes;

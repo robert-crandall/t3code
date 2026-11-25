@@ -119,15 +119,17 @@ export function useT3ConnectAccountPage(): {
       <DialogPopup className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{gt("T3 Connect account")}</DialogTitle>
-          <div className="mt-2 flex flex-wrap gap-1 border-b border-border pb-2" role="tablist">
+          <nav
+            aria-label={gt("T3 Connect account sections")}
+            className="mt-2 flex flex-wrap gap-1 border-b border-border pb-2"
+          >
             {T3_CONNECT_ACCOUNT_PAGES.map((page) => {
               const selected = activePage === page.url;
               return (
                 <button
                   key={page.url}
                   type="button"
-                  role="tab"
-                  aria-selected={selected}
+                  aria-current={selected ? "page" : undefined}
                   onClick={() => setActivePage(page.url)}
                   className={cn(
                     "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
@@ -141,7 +143,7 @@ export function useT3ConnectAccountPage(): {
                 </button>
               );
             })}
-          </div>
+          </nav>
         </DialogHeader>
         <DialogPanel>{activePage ? renderAccountPageContent(activePage, close) : null}</DialogPanel>
       </DialogPopup>

@@ -17,6 +17,10 @@ import {
   type RelayStoredSession,
 } from "@t3tools/client-runtime/relay";
 import type { DesktopCloudAuthState } from "@t3tools/contracts";
+import {
+  CONNECT_LOOPBACK_CALLBACK_PATH,
+  connectLoopbackRedirectUri,
+} from "@t3tools/shared/connectAuth";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 
@@ -28,7 +32,6 @@ import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
 declare const __T3CODE_BUILD_RELAY_URL__: string | undefined;
 
-const OAUTH_CALLBACK_PATH = "/oauth/callback";
 const OAUTH_SIGN_IN_TIMEOUT_MS = 5 * 60_000;
 const ENCRYPTED_SESSION_VERSION = 1;
 
@@ -210,7 +213,7 @@ async function receiveLoopbackOAuthCode(input: {
         return;
       }
       const parsed = URL.parse(request.url ?? "/", "http://127.0.0.1");
-      if (!parsed || parsed.pathname !== OAUTH_CALLBACK_PATH) {
+      if (!parsed || parsed.pathname !== CONNECT_LOOPBACK_CALLBACK_PATH) {
         writeCallbackResponse(response, 404, "Not found", "Return to T3 Code.");
         return;
       }
@@ -273,7 +276,7 @@ async function receiveLoopbackOAuthCode(input: {
         finish({ ok: false, error: new Error("Could not bind loopback callback listener.") });
         return;
       }
-      redirectUri = `http://127.0.0.1:${address.port}${OAUTH_CALLBACK_PATH}`;
+      redirectUri = connectLoopbackRedirectUri(address.port);
       timer = setTimeout(() => {
         finish({ ok: false, error: new Error("Timed out waiting for GitHub sign-in callback.") });
       }, input.timeoutMs);
@@ -286,6 +289,17 @@ async function receiveLoopbackOAuthCode(input: {
     });
   });
 }
+
+const isStrongEncryptionAvailable = Effect.fn("DesktopCloudAuth.isStrongEncryptionAvailable")(
+  function* (safeStorage: ElectronSafeStorage.ElectronSafeStorage["Service"]) {
+    if (!(yield* safeStorage.isEncryptionAvailable)) {
+      return false;
+    }
+    const backend = yield* safeStorage.selectedStorageBackend;
+    return Option.getOrUndefined(backend) !== "basic_text";
+  },
+  Effect.orElseSucceed(() => false),
+);
 
 function makeEncryptedTokenStore(input: {
   readonly fileSystem: FileSystem.FileSystem;
@@ -303,9 +317,9 @@ function makeEncryptedTokenStore(input: {
         Effect.gen(function* () {
           const exists = yield* fileSystem.exists(sessionFilePath);
           if (!exists) return null;
-          if (!(yield* safeStorage.isEncryptionAvailable)) {
+          if (!(yield* isStrongEncryptionAvailable(safeStorage))) {
             yield* Effect.logWarning(
-              "OS secret storage is unavailable; cannot decrypt saved cloud auth session.",
+              "OS secret storage is unavailable or using basic_text; cannot decrypt saved cloud auth session safely.",
             );
             return null;
           }
@@ -326,7 +340,7 @@ function makeEncryptedTokenStore(input: {
     save: (session: RelayStoredSession) =>
       runEffect(
         Effect.gen(function* () {
-          if (!(yield* safeStorage.isEncryptionAvailable)) {
+          if (!(yield* isStrongEncryptionAvailable(safeStorage))) {
             return yield* new DesktopCloudAuthError({
               message:
                 "OS keychain encryption is unavailable; refusing to persist cloud credentials in plaintext.",
@@ -349,16 +363,7 @@ function makeEncryptedTokenStore(input: {
         }),
       ),
 
-    clear: () =>
-      runEffect(
-        fileSystem.remove(sessionFilePath, { force: true }).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Could not remove desktop cloud auth session file.", {
-              error,
-            }),
-          ),
-        ),
-      ),
+    clear: () => runEffect(fileSystem.remove(sessionFilePath, { force: true })),
   };
 }
 
@@ -469,7 +474,7 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
         if (relayUrl === null || session === null) {
           throw new Error("T3 Connect relay URL is not configured in this build.");
         }
-        const encryptionAvailable = await runEffect(safeStorage.isEncryptionAvailable);
+        const encryptionAvailable = await runEffect(isStrongEncryptionAvailable(safeStorage));
         if (!encryptionAvailable) {
           throw new Error(
             "OS keychain encryption is unavailable; cannot sign in to T3 Connect safely.",
@@ -531,7 +536,15 @@ export const make = Effect.fn("DesktopCloudAuth.make")(function* (
       abortActiveSignIn();
       await ensureStarted();
       if (session !== null) {
-        await session.signOut();
+        try {
+          await session.signOut();
+        } catch (error) {
+          await runEffect(
+            Effect.logWarning("Could not clear persisted desktop cloud auth session on sign-out.", {
+              error,
+            }),
+          );
+        }
         return session.getSnapshot();
       }
       broadcastState({ status: "signedOut", identity: null });

@@ -2,6 +2,7 @@ import type { RelayAuthIdentity, RelayAuthSnapshot } from "@t3tools/client-runti
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { createContext, use, useSyncExternalStore, type ReactNode } from "react";
+import { AppState } from "react-native";
 
 import { runtime } from "../../lib/runtime";
 import { unregisterAgentAwarenessDeviceForCurrentUser } from "../agent-awareness/remoteRegistration";
@@ -57,9 +58,20 @@ const mobileCloudAuth: MobileCloudAuthController | null = relayUrl
 
 if (mobileCloudAuth) {
   cloudAccountService.attach(mobileCloudAuth.accountSource);
-  void mobileCloudAuth.initialize().catch((error) => {
-    console.warn("[t3-connect] Could not initialize mobile cloud auth session.", error);
-  });
+  const controller = mobileCloudAuth;
+  const initializeWithRetry = () => {
+    void controller.initialize().catch((error) => {
+      console.warn("[t3-connect] Could not initialize mobile cloud auth session.", error);
+      // Retry when returning to foreground (e.g. after iOS keychain becomes readable post-unlock)
+      // without transitioning to signedOut and wiping persisted environments on a transient read error.
+      const subscription = AppState.addEventListener("change", (nextState) => {
+        if (nextState !== "active") return;
+        subscription.remove();
+        initializeWithRetry();
+      });
+    });
+  };
+  initializeWithRetry();
 } else {
   // Without cloud config no account can ever activate, so drop anything a
   // previous build with cloud enabled left registered.

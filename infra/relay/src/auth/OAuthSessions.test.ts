@@ -383,6 +383,18 @@ describe("OAuthSessions", () => {
         expect(first.refreshToken).toBe(second.refreshToken);
         expect(getForUpdateCount()).toBeGreaterThanOrEqual(3);
 
+        // Retrying the previous token with small cross-worker clock skew slightly behind rotatedAt
+        // still succeeds within the rotation grace window instead of falsely revoking the session.
+        yield* TestClock.setTime(startMs - 500);
+        const skewedGrace = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.rotate({
+            refreshToken: created.refreshToken,
+            clientId: "t3-cli",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(skewedGrace).toEqual(first);
+
         // Retrying the previous token 30s later (still inside the 60s grace window) still returns R1.
         yield* TestClock.setTime(startMs + 30_000);
         const withinGrace = yield* Effect.gen(function* () {

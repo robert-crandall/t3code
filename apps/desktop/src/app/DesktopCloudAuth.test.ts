@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { vi } from "vite-plus/test";
 
@@ -23,14 +24,14 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${header}.${body}.sig`;
 }
 
-function makeFakeSafeStorage(available = true) {
+function makeFakeSafeStorage(available = true, backend: Option.Option<string> = Option.none()) {
   const isEncryptionAvailableCalls = { count: 0 };
   const service = ElectronSafeStorage.ElectronSafeStorage.of({
     isEncryptionAvailable: Effect.sync(() => {
       isEncryptionAvailableCalls.count += 1;
       return available;
     }),
-    selectedStorageBackend: Effect.succeedNone,
+    selectedStorageBackend: Effect.succeed(backend),
     encryptString: (plaintext) =>
       Effect.succeed(new Uint8Array(Buffer.from(`enc:${plaintext}`, "utf8"))),
     decryptString: (encrypted) => {
@@ -189,6 +190,9 @@ describe("DesktopCloudAuth", () => {
           assert.strictEqual(parsedOpen.pathname, "/v1/auth/authorize");
           assert.strictEqual(parsedOpen.searchParams.get("client_id"), "t3-desktop");
           assert.strictEqual(parsedOpen.searchParams.get("code_challenge_method"), "S256");
+          const parsedRedirect = new URL(parsedOpen.searchParams.get("redirect_uri")!);
+          assert.strictEqual(parsedRedirect.hostname, "127.0.0.1");
+          assert.strictEqual(parsedRedirect.pathname, "/callback");
 
           assert.strictEqual(yield* auth.getAccessToken(), accessToken);
           assert.strictEqual(revealMock.mock.calls.length, 1);
@@ -240,6 +244,49 @@ describe("DesktopCloudAuth", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const stateDir = yield* fileSystem.makeTempDirectoryScoped();
       const { service: safeStorage } = makeFakeSafeStorage(false);
+      const electronWindow = {
+        sendAll: () => Effect.void,
+        currentMainOrFirst: Effect.succeedNone,
+        reveal: () => Effect.void,
+      } as unknown as ElectronWindow.ElectronWindow["Service"];
+      const shell = ElectronShell.ElectronShell.of({
+        openExternal: () => Effect.succeed(true),
+        openSystemSettings: () => Effect.succeed(false),
+        copyText: () => Effect.void,
+      });
+
+      const layer = Layer.effect(
+        DesktopCloudAuth.DesktopCloudAuth,
+        DesktopCloudAuth.make({ relayUrl: "https://relay.crandalls.cloud" }),
+      ).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+              stateDir,
+            } as DesktopEnvironment.DesktopEnvironment["Service"]),
+            Layer.succeed(HostProcess.Environment, {}),
+            Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
+            Layer.succeed(ElectronShell.ElectronShell, shell),
+            Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const auth = yield* DesktopCloudAuth.DesktopCloudAuth;
+        yield* auth.start;
+        const exit = yield* Effect.exit(auth.signIn);
+        assert.isTrue(Exit.isFailure(exit));
+      }).pipe(Effect.scoped, Effect.provide(layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses to sign in when Linux safeStorage falls back to basic_text", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const stateDir = yield* fileSystem.makeTempDirectoryScoped();
+      const { service: safeStorage } = makeFakeSafeStorage(true, Option.some("basic_text"));
       const electronWindow = {
         sendAll: () => Effect.void,
         currentMainOrFirst: Effect.succeedNone,

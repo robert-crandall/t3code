@@ -14,15 +14,15 @@ Client and bundled-server builds embed `T3CODE_RELAY_URL` at build time; EAS pre
 
 ## GitHub OAuth setup (relay-hosted)
 
-T3 Connect authenticates CLI, desktop, web, and mobile clients through the relay's built-in GitHub OAuth endpoints (`/v1/auth/authorize`, `/v1/auth/callback`, `/v1/auth/token`, `/v1/auth/device/code`, `/v1/auth/logout`, `/v1/auth/jwks.json`):
+T3 Connect authenticates CLI, desktop, and mobile clients through the relay's built-in GitHub OAuth endpoints (`/v1/auth/authorize`, `/v1/auth/github/callback`, `/v1/auth/token`, `/v1/auth/device`, `/v1/auth/revoke`):
 
-1. Create a GitHub OAuth App with callback URL `https://<your-relay-host>/v1/auth/callback`.
-2. Configure `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `GITHUB_ALLOWED_USER_IDS`, `RELAY_JWT_PRIVATE_KEY_JWK`, and `RELAY_JWT_KEY_ID` as relay secrets (never in client config).
+1. Create a GitHub OAuth App with callback URL `https://<your-relay-host>/v1/auth/github/callback`.
+2. Configure `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and `CloudMintKeyPair` (plus optional `GITHUB_OAUTH_ALLOWED_ORGS`) as relay secrets via Alchemy/Wrangler (never in client config).
 3. Built-in client IDs and redirect URIs handled by the relay:
-   - CLI (`t3-cli`): `http://127.0.0.1:34338/callback` (PKCE) and `/v1/auth/device/code` (headless/SSH device flow)
-   - Desktop (`t3-desktop`): `t3code://auth/callback`, `t3code-dev://auth/callback`, and `http://127.0.0.1:<port>/callback`
-   - Mobile (`t3-mobile`): `t3code://auth/callback`, `t3code-dev://auth/callback`, and `t3code-preview://auth/callback`
-4. To restrict sign-ins, list the allowed GitHub numeric user IDs in `GITHUB_ALLOWED_USER_IDS`.
+   - CLI (`t3-cli`): `http://127.0.0.1:<port>/callback` (PKCE) and `/v1/auth/device` (headless/SSH device flow)
+   - Desktop (`t3-desktop`): `http://127.0.0.1:<port>/callback` (Electron main-process loopback PKCE; the desktop renderer signs in via Electron IPC)
+   - Mobile (`t3-mobile`): `t3code://oauth/callback`, `t3code-dev://oauth/callback`, `t3code-preview://oauth/callback`, and `t3code-private://oauth/callback`
+4. To restrict sign-ins to specific GitHub organizations, set `GITHUB_OAUTH_ALLOWED_ORGS` on the relay.
 
 ## Android FCM push setup
 

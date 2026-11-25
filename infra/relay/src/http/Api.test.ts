@@ -7,6 +7,7 @@ import {
 import * as EnvironmentLinker from "../environments/EnvironmentLinker.ts";
 import * as CloudMintSigner from "../auth/CloudMintSigner.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
+import * as DpopProofs from "../auth/DpopProofs.ts";
 import * as Devices from "../agentActivity/Devices.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no generateKeyPairSync.
 import * as NodeCrypto from "node:crypto";
@@ -37,11 +38,14 @@ import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { EnvironmentId } from "@t3tools/contracts";
 import {
+  RelayAccessTokenType,
+  RelayDpopTokenExchangeGrantType,
   RelayEnvironmentAuth,
   RelayEnvironmentPrincipal,
   RelayApi,
   RelayEnvironmentLinkUnavailableError,
   RelayEnvironmentLinkRequest,
+  RelayJwtSubjectTokenType,
 } from "@t3tools/contracts/relay";
 import { relayProtectedErrorMessage } from "@t3tools/client-runtime/relay";
 import { RELAY_MANAGED_TUNNEL_RECOVERY_TYP, signRelayJwt } from "@t3tools/shared/relayJwt";
@@ -1608,6 +1612,95 @@ describe("relay CORS", () => {
         );
       }
     }).pipe(Effect.scoped),
+  );
+});
+
+describe("relay DPoP token exchange client binding", () => {
+  it.effect(
+    "allows desktop/web tokens for t3-web and mobile tokens for t3-mobile while rejecting cross-client and CLI tokens",
+    () => {
+      const cases = [
+        { subjectClientId: "t3-desktop", requestedClientId: "t3-web", expectedStatus: 200 },
+        { subjectClientId: "t3-web", requestedClientId: "t3-web", expectedStatus: 200 },
+        { subjectClientId: "t3-mobile", requestedClientId: "t3-mobile", expectedStatus: 200 },
+        { subjectClientId: "t3-desktop", requestedClientId: "t3-mobile", expectedStatus: 401 },
+        { subjectClientId: "t3-mobile", requestedClientId: "t3-web", expectedStatus: 401 },
+        { subjectClientId: "t3-cli", requestedClientId: "t3-web", expectedStatus: 401 },
+      ] as const;
+
+      const tokenClientByBearer = new Map<string, string>(
+        cases.map((entry, index) => [`bearer-${index}`, entry.subjectClientId]),
+      );
+
+      const layerHandlers = RelayHttpApi.layerTokenApi.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(RelayConfiguration.RelayConfiguration, relaySettings),
+            NodeCryptoLayer.layer,
+            Layer.mock(DpopProofs.DpopProofReplay, {
+              verifyAndConsume: () => Effect.succeed("thumbprint-1"),
+            }),
+            Layer.mock(RelayTokens.RelayTokens, {
+              resolveDpopAccessTokenScopes: () => ["environment:connect"],
+              verifyClientAccessToken: ({ token }) => {
+                const clientId = tokenClientByBearer.get(token);
+                if (!clientId) return Effect.succeed(null);
+                return Effect.succeed({
+                  iss: "https://relay.example.test",
+                  aud: "https://relay.example.test",
+                  sub: "github:42",
+                  client_id: clientId,
+                  preferred_username: "robert-crandall",
+                  jti: "jti-1",
+                  iat: 1_700_000_000,
+                  exp: 1_700_000_900,
+                });
+              },
+              issueDpopAccessToken: ({ clientId }) => Effect.succeed(`dpop-for-${clientId}`),
+            }),
+          ),
+        ),
+      );
+
+      return Effect.gen(function* () {
+        const app = yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            HttpRouter.toWebHandler(
+              HttpApiBuilder.layer(HttpApi.make("RelayApi").add(RelayApi.groups.token)).pipe(
+                Layer.provide(layerHandlers),
+                Layer.provide(HttpServer.layerServices),
+              ),
+              { disableLogger: true },
+            ),
+          ),
+          (app) => Effect.promise(() => app.dispose()),
+        );
+
+        for (const [index, entry] of cases.entries()) {
+          const response = yield* Effect.promise(() =>
+            app.handler(
+              new Request("https://relay.example.test/v1/client/dpop-token", {
+                method: "POST",
+                headers: {
+                  "content-type": "application/x-www-form-urlencoded",
+                  dpop: "signed-dpop-proof",
+                },
+                body: new URLSearchParams({
+                  grant_type: RelayDpopTokenExchangeGrantType,
+                  subject_token: `bearer-${index}`,
+                  subject_token_type: RelayJwtSubjectTokenType,
+                  requested_token_type: RelayAccessTokenType,
+                  resource: "https://relay.example.test",
+                  scope: "environment:connect",
+                  client_id: entry.requestedClientId,
+                }).toString(),
+              }),
+            ),
+          );
+          expect(response.status).toBe(entry.expectedStatus);
+        }
+      }).pipe(Effect.scoped);
+    },
   );
 });
 

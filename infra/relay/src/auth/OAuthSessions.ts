@@ -25,6 +25,8 @@ const REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS = Math.floor(REFRESH_TOKEN_ABSOLUTE_TTL
 const TOKEN_ENCRYPTION_SALT = new TextEncoder().encode("t3code-relay-oauth-github-token-v1");
 const TOKEN_ENCRYPTION_INFO = new TextEncoder().encode("aes-256-gcm");
 
+const REFRESH_ROTATION_CLOCK_SKEW_TOLERANCE_MS = 5_000;
+
 function isWithinRotationGraceWindow(
   row: { readonly previousTokenHash: string | null; readonly rotatedAt: string | null },
   tokenHash: string,
@@ -38,10 +40,13 @@ function isWithinRotationGraceWindow(
     return false;
   }
   const rotatedAtMs = Date.parse(row.rotatedAt);
+  if (!Number.isFinite(rotatedAtMs)) {
+    return false;
+  }
+  const elapsedMs = nowMs - rotatedAtMs;
   return (
-    Number.isFinite(rotatedAtMs) &&
-    nowMs >= rotatedAtMs &&
-    nowMs - rotatedAtMs <= REFRESH_TOKEN_ROTATION_GRACE_WINDOW_MS
+    elapsedMs >= -REFRESH_ROTATION_CLOCK_SKEW_TOLERANCE_MS &&
+    elapsedMs <= REFRESH_TOKEN_ROTATION_GRACE_WINDOW_MS
   );
 }
 
@@ -317,15 +322,17 @@ const make = Effect.gen(function* () {
       }
 
       const tokenHash = yield* hashToken(input.refreshToken);
-      const now = yield* DateTime.now;
-      const nowMs = now.epochMilliseconds;
-      const nowIso = DateTime.formatIso(now);
 
       const rows = yield* db
         .select()
         .from(relayOauthSessions)
         .where(eq(relayOauthSessions.id, claims.sid))
         .limit(1);
+
+      // Sample wall-clock time after reading the row so concurrent rotations do not appear in the future.
+      const now = yield* DateTime.now;
+      const nowMs = now.epochMilliseconds;
+      const nowIso = DateTime.formatIso(now);
 
       const row = rows[0];
       if (!row) {
@@ -397,16 +404,17 @@ const make = Effect.gen(function* () {
       // Returns a tagged value instead of failing on replay so the transaction commits revocation.
       return yield* transactions.withTransaction(
         Effect.gen(function* () {
-          const now = yield* DateTime.now;
-          const nowMs = now.epochMilliseconds;
-          const nowIso = DateTime.formatIso(now);
-
           const rows = yield* db
             .select()
             .from(relayOauthSessions)
             .where(eq(relayOauthSessions.id, claims.sid))
             .for("update")
             .limit(1);
+
+          // Sample wall-clock time after acquiring the row lock so concurrent refreshes see a post-lock timestamp.
+          const now = yield* DateTime.now;
+          const nowMs = now.epochMilliseconds;
+          const nowIso = DateTime.formatIso(now);
 
           const row = rows[0];
           if (!row) {
