@@ -359,6 +359,11 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       } catch {
         // Explicit sign-in may replace an unreadable stored session.
       }
+      if (input.signal?.aborted || generation !== attemptGeneration) {
+        return new Error(
+          input.signal?.aborted ? "Sign-in was canceled." : "Sign-in was superseded or signed out.",
+        );
+      }
       try {
         await options.store.save(nextSession);
       } catch (error) {
