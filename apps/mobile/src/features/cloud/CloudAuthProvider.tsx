@@ -72,6 +72,11 @@ if (mobileCloudAuth) {
     });
   };
   initializeWithRetry();
+  AppState.addEventListener("change", (nextState) => {
+    if (nextState === "active") {
+      cloudAccountService.retryIfFailed();
+    }
+  });
 } else {
   // Without cloud config no account can ever activate, so drop anything a
   // previous build with cloud enabled left registered.

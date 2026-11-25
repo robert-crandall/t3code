@@ -245,6 +245,36 @@ describe("createCloudAccountService", () => {
     ]);
   });
 
+  it("retries a rejected activation via retryIfFailed without a new source emission", async () => {
+    const failed = Promise.withResolvers<void>();
+    const activated = Promise.withResolvers<void>();
+    let attempts = 0;
+    const service = createCloudAccountService<CloudAccountSource>({
+      deactivate: () => undefined,
+      detach: () => undefined,
+      cleanUp: async () => undefined,
+      prepare: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          queueMicrotask(failed.resolve);
+          throw new Error("restore failed");
+        }
+      },
+      activate: () => {
+        activated.resolve();
+      },
+    });
+    const { source, emit } = makeSource();
+    service.attach(source);
+    emit({ status: "signedIn", accountId: "a" });
+    await failed.promise;
+    expect(service.getState()).toMatchObject({ _tag: "Failed", accountId: "a" });
+
+    service.retryIfFailed();
+    await activated.promise;
+    expect(service.getState()).toEqual({ _tag: "Active", accountId: "a" });
+  });
+
   it("detaches from a replaced source instance", () => {
     const { service, log } = makeService();
     const first = makeSource();

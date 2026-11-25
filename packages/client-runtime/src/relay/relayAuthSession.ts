@@ -469,12 +469,11 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         if (generation !== attemptGeneration) {
           return null;
         }
-        const latestStored = hasUnsavedCache
-          ? null
-          : matchesRelayOrigin(await options.store.load().catch(() => null));
+        const storedOnDisk = await options.store.load().catch(() => null);
         if (generation !== attemptGeneration) {
           return null;
         }
+        const latestStored = hasUnsavedCache ? null : matchesRelayOrigin(storedOnDisk);
         // Only clear the session if nobody else rotated or replaced the refresh token while we were in flight.
         if (latestStored !== null && latestStored.refreshToken !== attemptedRefreshToken) {
           cachedSession = latestStored;
@@ -483,7 +482,9 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         }
         cachedSession = null;
         hasUnsavedCache = false;
-        await options.store.clear().catch(() => undefined);
+        if (storedOnDisk === null || storedOnDisk.relayOrigin === origin) {
+          await options.store.clear().catch(() => undefined);
+        }
         if (generation === attemptGeneration) {
           setSnapshot({ status: "signedOut", identity: null });
         }
@@ -534,11 +535,14 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       if (generation !== signOutGeneration) {
         return;
       }
-      previous = cachedSession ?? matchesRelayOrigin(await options.store.load().catch(() => null));
+      const storedOnDisk = await options.store.load().catch(() => null);
+      previous = cachedSession ?? matchesRelayOrigin(storedOnDisk);
       cachedSession = null;
       hasUnsavedCache = false;
       try {
-        await options.store.clear();
+        if (storedOnDisk === null || storedOnDisk.relayOrigin === origin) {
+          await options.store.clear();
+        }
       } catch (error) {
         clearError = error;
       }

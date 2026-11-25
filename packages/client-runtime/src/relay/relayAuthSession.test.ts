@@ -536,6 +536,7 @@ describe("relayAuthSession", () => {
     await session.initialize();
     expect(session.getSnapshot()).toEqual({ status: "signedOut", identity: null });
     expect(await session.getAccessToken()).toBeNull();
+    await session.signOut();
     expect(requestedUrls).toEqual([]);
     expect(getStored()).toEqual(otherOriginSession);
   });

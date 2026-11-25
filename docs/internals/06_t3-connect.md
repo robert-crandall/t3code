@@ -68,4 +68,4 @@ disrupting existing slots.
 - Interactive clients (desktop, mobile, and local CLI) use OAuth 2.0 Authorization Code + PKCE
   (`/v1/auth/authorize` -> `/v1/auth/github/callback` -> `/v1/auth/token`).
 - SSH and headless CLI sessions use GitHub's device authorization flow proxied through
-  `/v1/auth/device/code` and `/v1/auth/device/token`.
+  `/v1/auth/device` and `/v1/auth/token` (using the device-code grant).

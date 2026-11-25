@@ -104,6 +104,8 @@ export interface CloudAccountService<S extends CloudAccountSource> {
    * source is attached detaches that one first.
    */
   readonly attach: (source: S) => () => void;
+  /** Retries a failed activation for the currently attached source without detaching. */
+  readonly retryIfFailed: () => void;
   readonly getState: () => CloudAccountState;
 }
 
@@ -214,6 +216,11 @@ export function createCloudAccountService<S extends CloudAccountSource>(
       return () => {
         if (attached === current) detach();
       };
+    },
+    retryIfFailed() {
+      if (!attached || state._tag !== "Failed") return;
+      generation += 1;
+      activate(attached.source, state.step, state.wasActive);
     },
     getState: () => state,
   };
