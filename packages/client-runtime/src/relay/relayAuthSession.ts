@@ -233,6 +233,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
   let initialized = false;
   let initPromise: Promise<RelayAuthSnapshot> | null = null;
   let refreshPromise: Promise<string | null> | null = null;
+  let persistRetryPromise: Promise<void> | null = null;
   // Serializes store.save/store.clear so an in-flight refresh or sign-in can never resurrect cleared credentials.
   let storageQueue: Promise<void> = Promise.resolve();
   // Incremented on every sign-in or sign-out so stale in-flight loads/exchanges/refreshes cannot overwrite newer state.
@@ -510,6 +511,30 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
       return null;
     }
     if (!forceRefresh && current.expiresAtMs - now() > refreshMarginMs) {
+      if (hasUnsavedCache && persistRetryPromise === null) {
+        const retryGeneration = generation;
+        const sessionToSave = current;
+        const pendingSave = withStorageLock(async () => {
+          if (
+            generation !== retryGeneration ||
+            !hasUnsavedCache ||
+            cachedSession !== sessionToSave
+          ) {
+            return;
+          }
+          await options.store.save(sessionToSave);
+          if (generation === retryGeneration && cachedSession === sessionToSave) {
+            hasUnsavedCache = false;
+          }
+        })
+          .catch(() => undefined)
+          .finally(() => {
+            if (persistRetryPromise === pendingSave) {
+              persistRetryPromise = null;
+            }
+          });
+        persistRetryPromise = pendingSave;
+      }
       return current.accessToken;
     }
     if (refreshPromise !== null) {
@@ -531,7 +556,9 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
     generation += 1;
     const signOutGeneration = generation;
     initialized = true;
-    let previous: RelayStoredSession | null = null;
+    let previous: RelayStoredSession | null = cachedSession;
+    cachedSession = null;
+    hasUnsavedCache = false;
     let clearError: unknown = null;
     await withStorageLock(async () => {
       if (generation !== signOutGeneration) {
@@ -541,9 +568,7 @@ export function createRelayAuthSession(options: RelayAuthSessionOptions): RelayA
         clearError = error;
         return undefined;
       });
-      previous = cachedSession ?? matchesRelayOrigin(storedOnDisk ?? null);
-      cachedSession = null;
-      hasUnsavedCache = false;
+      previous = previous ?? matchesRelayOrigin(storedOnDisk ?? null);
       try {
         if (storedOnDisk === null || storedOnDisk?.relayOrigin === origin) {
           await options.store.clear();

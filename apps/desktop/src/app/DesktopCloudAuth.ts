@@ -337,12 +337,9 @@ function makeEncryptedTokenStore(input: {
           const plaintext = yield* safeStorage.decryptString(bytes);
           return yield* decodeStoredSessionJson(plaintext).pipe(
             Effect.catchTags({
-              SchemaError: (error) =>
+              SchemaError: () =>
                 Effect.logWarning(
                   "Ignoring malformed decrypted desktop cloud auth session payload.",
-                  {
-                    error,
-                  },
                 ).pipe(Effect.as(null)),
             }),
           );

@@ -776,4 +776,227 @@ describe("relayAuthSession", () => {
     expect(cleared).toBe(false);
     expect(revokedTokens).toEqual(["rt_minted_1"]);
   });
+
+  it("clears cachedSession before awaiting storage on signOut so concurrent getAccessToken cannot resurrect the session", async () => {
+    const currentTime = 1_000_000_000;
+    const loadStarted = Promise.withResolvers<void>();
+    const releaseLoad = Promise.withResolvers<void>();
+    let stored: RelayStoredSession | null = {
+      accessToken: "expiring-access",
+      refreshToken: "rt_1",
+      expiresAtMs: currentTime + 1_000,
+      identity: { userId: "github:7", login: "octocat", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
+    };
+    let loadCalls = 0;
+    let refreshRequests = 0;
+
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-desktop",
+      store: {
+        load: async () => {
+          loadCalls += 1;
+          if (loadCalls === 2) {
+            loadStarted.resolve();
+            await releaseLoad.promise;
+          }
+          return stored;
+        },
+        save: async (next) => {
+          stored = next;
+        },
+        clear: async () => {
+          stored = null;
+        },
+      },
+      now: () => currentTime,
+      fetch: async (input) => {
+        if (String(input).endsWith("/v1/auth/token")) {
+          refreshRequests += 1;
+          return new Response(
+            JSON.stringify({
+              access_token: makeFakeJwt({
+                sub: "github:7",
+                preferred_username: "octocat",
+                exp: Math.floor((currentTime + 900_000) / 1_000),
+              }),
+              refresh_token: "rt_resurrected",
+              expires_in: 900,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    await session.initialize();
+    const pendingSignOut = session.signOut();
+    await loadStarted.promise;
+
+    expect(await session.getAccessToken()).toBeNull();
+    releaseLoad.resolve();
+    await pendingSignOut;
+
+    expect(refreshRequests).toBe(0);
+    expect(stored).toBeNull();
+    expect(session.getSnapshot()).toEqual({ status: "signedOut", identity: null });
+  });
+
+  it("retries persisting an unsaved refreshed session on subsequent getAccessToken reads", async () => {
+    const currentTime = 1_000_000_000;
+    const refreshedAccess = makeFakeJwt({
+      sub: "github:7",
+      preferred_username: "octocat",
+      exp: Math.floor((currentTime + 900_000) / 1_000),
+    });
+    let stored: RelayStoredSession | null = {
+      accessToken: "stale-access",
+      refreshToken: "rt_1",
+      expiresAtMs: currentTime + 1_000,
+      identity: { userId: "github:7", login: "octocat", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
+    };
+    let failSaves = true;
+    const saved = Promise.withResolvers<void>();
+
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-desktop",
+      store: {
+        load: async () => stored,
+        save: async (next) => {
+          if (failSaves) {
+            throw new Error("disk temporarily full");
+          }
+          stored = next;
+          saved.resolve();
+        },
+        clear: async () => {
+          stored = null;
+        },
+      },
+      now: () => currentTime,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            access_token: refreshedAccess,
+            refresh_token: "rt_2",
+            expires_in: 900,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    await session.initialize();
+    expect(await session.getAccessToken()).toBe(refreshedAccess);
+    expect(stored?.refreshToken).toBe("rt_1");
+
+    failSaves = false;
+    expect(await session.getAccessToken()).toBe(refreshedAccess);
+    await saved.promise;
+    expect(stored?.refreshToken).toBe("rt_2");
+  });
+
+  it("does not clear storage when signOut encounters a store.load failure", async () => {
+    const currentTime = 1_000_000_000;
+    let loadCalls = 0;
+    let cleared = false;
+    const stored: RelayStoredSession = {
+      accessToken: "live-access",
+      refreshToken: "rt_1",
+      expiresAtMs: currentTime + 900_000,
+      identity: { userId: "github:7", login: "octocat", email: null },
+      relayOrigin: "https://relay.crandalls.cloud",
+    };
+
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-desktop",
+      store: {
+        load: async () => {
+          loadCalls += 1;
+          if (loadCalls === 2) {
+            throw new Error("keychain locked during sign-out");
+          }
+          return stored;
+        },
+        save: async () => undefined,
+        clear: async () => {
+          cleared = true;
+        },
+      },
+      now: () => currentTime,
+      fetch: async () => new Response(null, { status: 204 }),
+    });
+
+    await session.initialize();
+    await expect(session.signOut()).rejects.toThrow("keychain locked during sign-out");
+    expect(cleared).toBe(false);
+    expect(session.getSnapshot()).toEqual({ status: "signedOut", identity: null });
+  });
+
+  it("aborts exchangeAuthorizationCode after deferred store.load without calling store.save", async () => {
+    const currentTime = 1_000_000_000;
+    const loadStarted = Promise.withResolvers<void>();
+    const releaseLoad = Promise.withResolvers<void>();
+    const revokedTokens: string[] = [];
+    let saveCalls = 0;
+
+    const session = createRelayAuthSession({
+      relayUrl: "https://relay.crandalls.cloud",
+      clientId: "t3-desktop",
+      store: {
+        load: async () => {
+          loadStarted.resolve();
+          await releaseLoad.promise;
+          return null;
+        },
+        save: async () => {
+          saveCalls += 1;
+        },
+        clear: async () => undefined,
+      },
+      now: () => currentTime,
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/v1/auth/token")) {
+          return new Response(
+            JSON.stringify({
+              access_token: makeFakeJwt({
+                sub: "github:7",
+                preferred_username: "octocat",
+                exp: Math.floor((currentTime + 900_000) / 1_000),
+              }),
+              refresh_token: "rt_abort_after_load",
+              expires_in: 900,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (String(input).endsWith("/v1/auth/revoke")) {
+          const params = new URLSearchParams(String(init?.body ?? ""));
+          revokedTokens.push(params.get("token") ?? "");
+          return new Response(null, { status: 204 });
+        }
+        return new Response("unexpected", { status: 500 });
+      },
+    });
+
+    const abortController = new AbortController();
+    const pendingExchange = session.exchangeAuthorizationCode({
+      code: "code_abort_load",
+      redirectUri: "http://127.0.0.1:43210/callback",
+      codeVerifier: "verifier_abort_load",
+      signal: abortController.signal,
+    });
+
+    await loadStarted.promise;
+    abortController.abort();
+    releaseLoad.resolve();
+
+    await expect(pendingExchange).rejects.toThrow("Sign-in was canceled.");
+    expect(saveCalls).toBe(0);
+    expect(revokedTokens).toEqual(["rt_abort_after_load"]);
+  });
 });
