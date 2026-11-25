@@ -227,4 +227,84 @@ describe("mobileCloudAuth", () => {
     expect(controller.getSnapshot()).toEqual({ status: "signedOut", identity: null });
     expect(store.current).toBeNull();
   });
+
+  it("surfaces initError on persistent store failures while keeping accountSource loading until retry or fresh sign-in succeeds", async () => {
+    let failLoads = true;
+    let saved: RelayStoredSession | null = null;
+    const store: RelayAuthTokenStore = {
+      async load() {
+        if (failLoads) {
+          throw new Error("Keychain read failed");
+        }
+        return saved;
+      },
+      async save(next) {
+        saved = next;
+      },
+      async clear() {
+        saved = null;
+      },
+    };
+    const accessToken = makeJwt({
+      sub: "github:42",
+      preferred_username: "octocat",
+      email: null,
+    });
+    const controller = createMobileCloudAuth({
+      relayUrl: "https://relay.example.test",
+      store,
+      fetch: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              access_token: accessToken,
+              refresh_token: "ref-fresh",
+              expires_in: 3600,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ) as typeof fetch,
+      now: () => 1_700_000_000_000,
+      openAuthSession: async (url, redirectUri) => {
+        const state = new URL(url).searchParams.get("state")!;
+        return { type: "success", url: `${redirectUri}?code=fresh-code&state=${state}` };
+      },
+    });
+
+    const accountEvents: Array<string> = [];
+    controller.accountSource.addListener((next) => accountEvents.push(next.status));
+    const uiNotifications = vi.fn();
+    controller.subscribe(uiNotifications);
+
+    await expect(controller.initialize()).rejects.toThrow("Keychain read failed");
+    expect(controller.getInitError()).toBe("Keychain read failed");
+    expect(controller.getSnapshot()).toEqual({ status: "loading", identity: null });
+    expect(controller.accountSource.getSnapshot?.()).toEqual({ status: "loading" });
+    expect(accountEvents).toEqual([]);
+    expect(uiNotifications).toHaveBeenCalledTimes(1);
+
+    // Fresh sign-in replaces unreadable credentials and clears initError.
+    await controller.signIn();
+    expect(controller.getInitError()).toBeNull();
+    expect(controller.getSnapshot().status).toBe("signedIn");
+    expect(controller.accountSource.getSnapshot?.()).toEqual({
+      status: "signedIn",
+      accountId: "github:42",
+    });
+    expect(accountEvents).toEqual(["signedIn"]);
+
+    // Separate controller recovers via retryInitialize once SecureStore becomes readable.
+    failLoads = true;
+    const retryController = createMobileCloudAuth({
+      relayUrl: "https://relay.example.test",
+      store,
+    });
+    await expect(retryController.initialize()).rejects.toThrow("Keychain read failed");
+    expect(retryController.getInitError()).toBe("Keychain read failed");
+
+    failLoads = false;
+    await retryController.initialize();
+    expect(retryController.getInitError()).toBeNull();
+    expect(retryController.getSnapshot().status).toBe("signedIn");
+  });
 });

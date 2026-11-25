@@ -31,6 +31,7 @@ export interface MobileCloudAuthAccountSource extends CloudAccountSource {
 export interface MobileCloudAuthController {
   readonly initialize: () => Promise<RelayAuthSnapshot>;
   readonly getSnapshot: () => RelayAuthSnapshot;
+  readonly getInitError: () => string | null;
   readonly subscribe: (listener: (snapshot: RelayAuthSnapshot) => void) => () => void;
   readonly getAccessToken: (options?: {
     readonly forceRefresh?: boolean;
@@ -156,6 +157,45 @@ export function createMobileCloudAuth(
     ((url: string, redirectUri: string) => WebBrowser.openAuthSessionAsync(url, redirectUri));
 
   let signInInFlight: Promise<MobileCloudSignInResult> | null = null;
+  let initError: string | null = null;
+  const listeners = new Set<(snapshot: RelayAuthSnapshot) => void>();
+
+  const notifyListeners = (snapshot: RelayAuthSnapshot) => {
+    for (const listener of listeners) {
+      listener(snapshot);
+    }
+  };
+
+  session.subscribe((next) => {
+    if (next.status !== "loading") {
+      initError = null;
+    }
+    notifyListeners(next);
+  });
+
+  const initialize = async (): Promise<RelayAuthSnapshot> => {
+    try {
+      const next = await session.initialize();
+      if (initError !== null) {
+        initError = null;
+        notifyListeners(next);
+      }
+      return next;
+    } catch (error) {
+      const current = session.getSnapshot();
+      const nextError =
+        current.status === "loading"
+          ? error instanceof Error && error.message.length > 0
+            ? error.message
+            : "Could not read saved session."
+          : null;
+      if (initError !== nextError) {
+        initError = nextError;
+        notifyListeners(current);
+      }
+      throw error;
+    }
+  };
 
   const signIn = async (): Promise<MobileCloudSignInResult> => {
     if (signInInFlight !== null) {
@@ -228,9 +268,15 @@ export function createMobileCloudAuth(
   };
 
   return {
-    initialize: () => session.initialize(),
+    initialize,
     getSnapshot: () => session.getSnapshot(),
-    subscribe: (listener) => session.subscribe(listener),
+    getInitError: () => initError,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
     getAccessToken: (options) => session.getAccessToken(options),
     signIn,
     signOut,

@@ -112,15 +112,18 @@ interface SettingsListSection {
 function ConfiguredSettingsRouteScreen() {
   const gt = useGT();
   const navigation = useNavigation();
-  const { isLoaded, isSignedIn, identity } = useCloudAuth();
+  const { isLoaded, isSignedIn, initError, identity } = useCloudAuth();
   const { savedConnectionsById } = useSavedRemoteConnections();
-  const accountLabel = !isLoaded
-    ? gt("Checking")
-    : !isSignedIn
-      ? gt("Sign in")
-      : identity
-        ? `@${identity.login}`
-        : gt("Signed in");
+  const accountLabel =
+    !isLoaded && initError === null
+      ? gt("Checking")
+      : !isSignedIn
+        ? initError !== null
+          ? gt("Retry")
+          : gt("Sign in")
+        : identity
+          ? `@${identity.login}`
+          : gt("Signed in");
 
   return (
     <SettingsList
@@ -130,7 +133,7 @@ function ConfiguredSettingsRouteScreen() {
           icon: "person.crop.circle",
           label: gt("T3 Account"),
           value: accountLabel,
-          disabled: !isLoaded,
+          disabled: !isLoaded && initError === null,
           onPress: () => navigation.navigate("SettingsAuth"),
         },
         environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),

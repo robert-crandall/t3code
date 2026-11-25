@@ -22,8 +22,10 @@ function ConfiguredSettingsAuthRouteScreen() {
   const gt = useGT();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { isLoaded, isSignedIn, identity, signIn, signOut } = useCloudAuth();
+  const { isLoaded, isSignedIn, initError, identity, retryInitialize, signIn, signOut } =
+    useCloudAuth();
   const handleHostBack = () => navigation.goBack();
+  const [isRetrying, setIsRetrying] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -39,6 +41,15 @@ function ConfiguredSettingsAuthRouteScreen() {
       navigation.goBack();
     }
   }, [authError, hasBeenSignedIn, isLoaded, isSignedIn, isSigningOut, navigation]);
+
+  const handleRetryInitialize = () => {
+    if (isRetrying) return;
+    setAuthError(null);
+    setIsRetrying(true);
+    void retryInitialize().finally(() => {
+      setIsRetrying(false);
+    });
+  };
 
   const handleSignIn = () => {
     if (isSigningIn) return;
@@ -79,7 +90,7 @@ function ConfiguredSettingsAuthRouteScreen() {
   return (
     <View collapsable={false} className="flex-1 overflow-hidden bg-sheet">
       <AppBar title={hasBeenSignedIn ? gt("T3 Account") : gt("Sign in")} onClose={handleHostBack} />
-      {!isLoaded ? (
+      {!isLoaded && initError === null ? (
         <View className="flex-1 items-center justify-center p-6">
           <AppActivityIndicator colorClassName="accent-foreground-muted" />
         </View>
@@ -140,11 +151,24 @@ function ConfiguredSettingsAuthRouteScreen() {
                 )}
               </Text>
             </View>
-            {authError ? <Text className="text-sm text-danger-foreground">{authError}</Text> : null}
+            {authError || initError ? (
+              <Text className="text-sm text-danger-foreground">{authError ?? initError}</Text>
+            ) : null}
+            {initError ? (
+              <Button
+                label={gt("Retry loading session")}
+                tone="secondary"
+                fullWidth
+                disabled={isSigningIn}
+                loading={isRetrying}
+                onPress={handleRetryInitialize}
+              />
+            ) : null}
             <Button
               label={gt("Sign in with GitHub")}
               tone="primary"
               fullWidth
+              disabled={isRetrying}
               loading={isSigningIn}
               onPress={handleSignIn}
             />

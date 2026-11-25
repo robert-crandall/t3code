@@ -390,7 +390,7 @@ function PairingScanCard(props: {
 
 function T3ConnectSection() {
   const gt = useGT();
-  const { isLoaded, isSignedIn } = useCloudAuth();
+  const { isLoaded, isSignedIn, initError } = useCloudAuth();
   const navigation = useNavigation();
   const { connectedEnvironments, onSetEnvironmentEnabled, onRemoveEnvironmentPress } =
     useRemoteConnections();
@@ -415,7 +415,7 @@ function T3ConnectSection() {
         <ListRow
           label={gt("Sign in to {product}", { product: "T3 Connect" })}
           description={gt("Reach your machines from anywhere, no network setup.")}
-          disabled={!isLoaded}
+          disabled={!isLoaded && initError === null}
           onPress={() => navigation.navigate("SettingsAuth")}
         />
       )}
