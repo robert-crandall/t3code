@@ -1649,6 +1649,7 @@ describe("GitHubOAuth", () => {
 
         let delayAfterClaim = false;
         let hangFirstComplete = false;
+        let completeAttemptCostMs = 0;
         let completeAttemptsStarted = 0;
         let trackCompleteAttempts = false;
         const completeAttemptDone = yield* Queue.unbounded<void>();
@@ -1671,24 +1672,22 @@ describe("GitHubOAuth", () => {
                 if (trackCompleteAttempts) {
                   yield* Queue.offer(completeAttemptStarted, undefined);
                 }
-                if (hangFirstComplete && completeAttemptsStarted === 1) {
-                  return yield* Effect.never.pipe(
-                    Effect.onExit(() =>
-                      trackCompleteAttempts
-                        ? Queue.offer(completeAttemptDone, undefined)
-                        : Effect.void,
-                    ),
-                  );
-                }
-                return yield* base
-                  .completeGitHubRefresh(input)
-                  .pipe(
-                    Effect.onExit(() =>
-                      trackCompleteAttempts
-                        ? Queue.offer(completeAttemptDone, undefined)
-                        : Effect.void,
-                    ),
-                  );
+                const inner =
+                  hangFirstComplete && completeAttemptsStarted === 1
+                    ? Effect.never
+                    : base.completeGitHubRefresh(input);
+                return yield* inner.pipe(
+                  Effect.onExit(() =>
+                    Effect.gen(function* () {
+                      if (completeAttemptCostMs > 0) {
+                        yield* TestClock.adjust(`${completeAttemptCostMs} millis`);
+                      }
+                      if (trackCompleteAttempts) {
+                        yield* Queue.offer(completeAttemptDone, undefined);
+                      }
+                    }),
+                  ),
+                );
               }),
             });
           }),
@@ -1901,7 +1900,27 @@ describe("GitHubOAuth", () => {
         expect(exhaustedRes.status).toBe(503);
         expect(injectedFailures).toBe(5);
 
-        // 7. Persistence failure on Rejected returns 503 (not invalid_grant) without revoking.
+        // 7. Lease-margin guard accounts for retryDelay and stops retries before outliving the 30s lease.
+        yield* TestClock.adjust(`${OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000} millis`);
+        failUpdateMode = "fail-all-after-claim";
+        completeAttemptCostMs = 7_000;
+        updateCount = 0;
+        injectedFailures = 0;
+        completeAttemptsStarted = 0;
+        trackCompleteAttempts = true;
+        const marginFiber = yield* Effect.forkChild(postRefresh(hungDbBody.refresh_token));
+        yield* Queue.take(completeAttemptStarted);
+        yield* advanceToNextAttempt("150 millis");
+        yield* advanceToNextAttempt("350 millis");
+        yield* Queue.take(completeAttemptDone);
+        const marginRes = yield* Fiber.join(marginFiber);
+        completeAttemptCostMs = 0;
+        trackCompleteAttempts = false;
+        failUpdateMode = "none";
+        expect(marginRes.status).toBe(503);
+        expect(injectedFailures).toBe(3);
+
+        // 8. Persistence failure on Rejected returns 503 (not invalid_grant) without revoking.
         yield* TestClock.adjust(`${OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000} millis`);
         refreshBehavior = "bad_refresh_token";
         failUpdateMode = "fail-all-after-claim";

@@ -45,8 +45,8 @@ const GITHUB_SCOPES = "read:org user:email";
 const GITHUB_REQUEST_TIMEOUT = Duration.seconds(7);
 const GITHUB_REFRESH_REQUEST_TIMEOUT = Duration.seconds(4);
 // Once HTTP 200 arrives from GitHub (single-use refresh token already consumed), give body
-// decoding its own timeout so a slow response at 3.99s is never aborted mid-parse.
-const GITHUB_REFRESH_DECODE_TIMEOUT = Duration.seconds(2);
+// decoding generous headroom (5s) so a slow 200 response is not aborted mid-parse.
+const GITHUB_REFRESH_DECODE_TIMEOUT = Duration.seconds(5);
 // Keep the uninterruptible refresh+persist critical section strictly inside
 // OAuthSessions.GITHUB_REFRESH_LEASE_MS (30s) while surviving brief DB connection blips.
 const GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT = Duration.seconds(2);
@@ -1333,7 +1333,10 @@ const handleToken = Effect.gen(function* () {
                   const nowMs = (yield* DateTime.now).epochMilliseconds;
                   if (
                     Number.isFinite(claimedLeaseUntilMs) &&
-                    nowMs + GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS >= claimedLeaseUntilMs
+                    nowMs +
+                      Duration.toMillis(retryDelay) +
+                      GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS >=
+                      claimedLeaseUntilMs
                   ) {
                     break;
                   }
