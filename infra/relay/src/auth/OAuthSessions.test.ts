@@ -690,6 +690,16 @@ describe("OAuthSessions", () => {
           });
           expect(stillInFlight).toEqual({ _tag: "InFlight" });
 
+          // Worker A's stale Rejected arriving BEFORE Worker B persists (while ciphertext is
+          // still ghr_1) must be fenced by claimedLeaseUntil and must NOT revoke Worker B's session.
+          const staleRejectBeforePersist = yield* sessions.completeGitHubRefresh({
+            _tag: "Rejected",
+            sessionId: created.sessionId,
+            expectedEncryptedGithubRefreshToken: claimA.expectedEncryptedGithubRefreshToken,
+            claimedLeaseUntil: claimA.claimedLeaseUntil,
+          });
+          expect(staleRejectBeforePersist).toEqual({ _tag: "Superseded" });
+
           // Worker B persists rotated (gho_2, ghr_2).
           const applied = yield* sessions.completeGitHubRefresh({
             _tag: "Succeeded",
@@ -701,11 +711,12 @@ describe("OAuthSessions", () => {
           });
           expect(applied).toEqual({ _tag: "Applied" });
 
-          // Worker A's stale Rejected (bad_refresh_token for ghr_1) is Superseded and does NOT revoke.
+          // Worker A's stale Rejected (bad_refresh_token for ghr_1) after persist is also Superseded.
           const staleReject = yield* sessions.completeGitHubRefresh({
             _tag: "Rejected",
             sessionId: created.sessionId,
             expectedEncryptedGithubRefreshToken: claimA.expectedEncryptedGithubRefreshToken,
+            claimedLeaseUntil: claimA.claimedLeaseUntil,
           });
           expect(staleReject).toEqual({ _tag: "Superseded" });
 
@@ -796,6 +807,7 @@ describe("OAuthSessions", () => {
             _tag: "Rejected",
             sessionId: doomed.sessionId,
             expectedEncryptedGithubRefreshToken: doomedClaim.expectedEncryptedGithubRefreshToken,
+            claimedLeaseUntil: doomedClaim.claimedLeaseUntil,
           });
           expect(rejected).toEqual({ _tag: "Applied" });
 

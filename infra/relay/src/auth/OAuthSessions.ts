@@ -21,8 +21,10 @@ import * as RelayTokens from "./RelayTokens.ts";
 export const REFRESH_TOKEN_ROLLING_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 export const REFRESH_TOKEN_ABSOLUTE_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
 export const REFRESH_TOKEN_ROTATION_GRACE_WINDOW_MS = 60 * 1_000;
-// Exceeds Api.ts's 9s request deadline so an active worker is never preempted mid-GitHub refresh.
-export const GITHUB_REFRESH_LEASE_MS = 15 * 1_000;
+// Covers the 4s GitHub refresh POST, 1s body decode, and up to 3 bounded DB persist attempts
+// (each up to 2s timeout + 5s @effect/sql-pg abort drain + backoff) so a worker is never
+// preempted while persisting a consumed single-use GitHub refresh token.
+export const GITHUB_REFRESH_LEASE_MS = 30 * 1_000;
 const REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS = Math.floor(REFRESH_TOKEN_ABSOLUTE_TTL_MS / 1_000);
 const TOKEN_ENCRYPTION_SALT = new TextEncoder().encode("t3code-relay-oauth-github-token-v1");
 const TOKEN_ENCRYPTION_INFO = new TextEncoder().encode("aes-256-gcm");
@@ -162,6 +164,7 @@ export type CompleteGitHubRefreshInput =
       readonly _tag: "Rejected";
       readonly sessionId: string;
       readonly expectedEncryptedGithubRefreshToken: string;
+      readonly claimedLeaseUntil: string;
     };
 
 export type CompleteGitHubRefreshResult =
@@ -648,6 +651,7 @@ const make = Effect.gen(function* () {
                   relayOauthSessions.encryptedGithubRefreshToken,
                   input.expectedEncryptedGithubRefreshToken,
                 ),
+                eq(relayOauthSessions.githubRefreshLeaseUntil, input.claimedLeaseUntil),
               ),
             )
             .returning({ id: relayOauthSessions.id });

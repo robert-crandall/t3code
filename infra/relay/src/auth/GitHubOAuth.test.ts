@@ -4,9 +4,11 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { eq } from "drizzle-orm";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
@@ -1526,6 +1528,7 @@ describe("GitHubOAuth", () => {
         let refreshVersion = 1;
         let pauseRefreshStarted: Deferred.Deferred<void> | null = null;
         let releasePausedRefresh: Deferred.Deferred<void> | null = null;
+        let refreshBehavior: "normal" | "hang" | "bad_refresh_token" = "normal";
 
         const mockHttpClient = HttpClient.make(
           Effect.fnUntraced(function* (request) {
@@ -1534,6 +1537,18 @@ describe("GitHubOAuth", () => {
               if (pauseRefreshStarted && releasePausedRefresh) {
                 yield* Deferred.succeed(pauseRefreshStarted, undefined);
                 yield* Deferred.await(releasePausedRefresh);
+              }
+              if (refreshBehavior === "hang") {
+                return yield* Effect.never;
+              }
+              if (refreshBehavior === "bad_refresh_token") {
+                return HttpClientResponse.fromWeb(
+                  request,
+                  Response.json({
+                    error: "bad_refresh_token",
+                    error_description: "The refresh token passed is incorrect or expired.",
+                  }),
+                );
               }
               refreshVersion += 1;
               return HttpClientResponse.fromWeb(
@@ -1558,8 +1573,11 @@ describe("GitHubOAuth", () => {
         );
 
         let delayAfterClaim = false;
+        let hangFirstComplete = false;
+        let completeAttemptsStarted = 0;
         let trackCompleteAttempts = false;
         const completeAttemptDone = yield* Queue.unbounded<void>();
+        const completeAttemptStarted = yield* Queue.unbounded<void>();
         const wrappedSessionsLayer = Layer.effect(
           OAuthSessions.OAuthSessions,
           Effect.gen(function* () {
@@ -1569,11 +1587,24 @@ describe("GitHubOAuth", () => {
               claimGitHubRefresh: Effect.fnUntraced(function* (input) {
                 const claimed = yield* base.claimGitHubRefresh(input);
                 if (delayAfterClaim) {
-                  yield* TestClock.adjust("4500 millis");
+                  yield* TestClock.adjust("3500 millis");
                 }
                 return claimed;
               }),
               completeGitHubRefresh: Effect.fnUntraced(function* (input) {
+                completeAttemptsStarted += 1;
+                if (trackCompleteAttempts) {
+                  yield* Queue.offer(completeAttemptStarted, undefined);
+                }
+                if (hangFirstComplete && completeAttemptsStarted === 1) {
+                  return yield* Effect.never.pipe(
+                    Effect.onExit(() =>
+                      trackCompleteAttempts
+                        ? Queue.offer(completeAttemptDone, undefined)
+                        : Effect.void,
+                    ),
+                  );
+                }
                 return yield* base
                   .completeGitHubRefresh(input)
                   .pipe(
@@ -1654,22 +1685,24 @@ describe("GitHubOAuth", () => {
         const [rowAfterOverrun] = yield* loadSessionRow();
         expect(rowAfterOverrun?.githubRefreshLeaseUntil).toBeNull();
 
-        const advanceAfterFailedAttempt = (duration: "150 millis" | "350 millis") =>
+        const advanceToNextAttempt = (delay: "150 millis" | "350 millis") =>
           Effect.gen(function* () {
             yield* Queue.take(completeAttemptDone);
-            for (let i = 0; i < 8; i++) {
-              yield* Effect.yieldNow;
-            }
-            yield* TestClock.adjust(duration);
+            // Drain the TestClock tracking scheduler so the retry fiber reaches Effect.sleep(delay).
+            yield* TestClock.adjust("0 millis");
+            yield* TestClock.adjust(delay);
+            yield* Queue.take(completeAttemptStarted);
           });
 
         // 2. First persistence attempt fails -> backoff retry succeeds and persists rotated tokens.
         failUpdateMode = "fail-once-after-claim";
         updateCount = 0;
         injectedFailures = 0;
+        completeAttemptsStarted = 0;
         trackCompleteAttempts = true;
         const retryFiber = yield* Effect.forkChild(postRefresh(created.refreshToken));
-        yield* advanceAfterFailedAttempt("150 millis");
+        yield* Queue.take(completeAttemptStarted);
+        yield* advanceToNextAttempt("150 millis");
         yield* Queue.take(completeAttemptDone);
         const retryRes = yield* Fiber.join(retryFiber);
         trackCompleteAttempts = false;
@@ -1696,6 +1729,10 @@ describe("GitHubOAuth", () => {
         yield* Effect.yieldNow;
         yield* Deferred.succeed(releasePausedRefresh, undefined);
         yield* Fiber.join(interruptWaiter);
+        const interruptedExit = yield* Fiber.await(interruptedFiber);
+        expect(Exit.isFailure(interruptedExit) && Cause.hasInterrupts(interruptedExit.cause)).toBe(
+          true,
+        );
         pauseRefreshStarted = null;
         releasePausedRefresh = null;
 
@@ -1710,23 +1747,72 @@ describe("GitHubOAuth", () => {
         expect(refreshPostCount).toBe(2);
         const afterInterruptBody = yield* readRefreshToken(afterInterruptRes);
 
-        // 4. Exhausting all persistence retries returns 503.
+        // 4. Hung GitHub refresh POST times out at 4s inside Effect.uninterruptible and releases lease.
         refreshVersion += 1; // expire ghu_fault_4
+        refreshBehavior = "hang";
+        pauseRefreshStarted = yield* Deferred.make<void>();
+        releasePausedRefresh = yield* Deferred.make<void>();
+        yield* Deferred.succeed(releasePausedRefresh, undefined);
+        const hungHttpFiber = yield* Effect.forkChild(
+          postRefresh(afterInterruptBody.refresh_token),
+        );
+        yield* Deferred.await(pauseRefreshStarted);
+        yield* TestClock.adjust("4 seconds");
+        const hungHttpRes = yield* Fiber.join(hungHttpFiber);
+        refreshBehavior = "normal";
+        pauseRefreshStarted = null;
+        releasePausedRefresh = null;
+        expect(hungHttpRes.status).toBe(503);
+        const [rowAfterHungHttp] = yield* loadSessionRow();
+        expect(rowAfterHungHttp?.githubRefreshLeaseUntil).toBeNull();
+        expect(rowAfterHungHttp?.revokedAt).toBeNull();
+
+        // 5. Hung first completeGitHubRefresh attempt times out at 2s inside Effect.uninterruptible,
+        // then retries after backoff and persists rotated tokens cleanly.
+        hangFirstComplete = true;
+        completeAttemptsStarted = 0;
+        trackCompleteAttempts = true;
+        const hungDbFiber = yield* Effect.forkChild(postRefresh(afterInterruptBody.refresh_token));
+        yield* Queue.take(completeAttemptStarted);
+        yield* TestClock.adjust("2 seconds");
+        yield* advanceToNextAttempt("150 millis");
+        yield* Queue.take(completeAttemptDone);
+        const hungDbRes = yield* Fiber.join(hungDbFiber);
+        hangFirstComplete = false;
+        trackCompleteAttempts = false;
+        expect(hungDbRes.status).toBe(200);
+        const hungDbBody = yield* readRefreshToken(hungDbRes);
+
+        // 6. Exhausting all persistence retries returns 503.
+        refreshVersion += 1; // expire latest token
         failUpdateMode = "fail-all-after-claim";
         updateCount = 0;
         injectedFailures = 0;
+        completeAttemptsStarted = 0;
         trackCompleteAttempts = true;
-        const exhaustedFiber = yield* Effect.forkChild(
-          postRefresh(afterInterruptBody.refresh_token),
-        );
-        yield* advanceAfterFailedAttempt("150 millis");
-        yield* advanceAfterFailedAttempt("350 millis");
+        const exhaustedFiber = yield* Effect.forkChild(postRefresh(hungDbBody.refresh_token));
+        yield* Queue.take(completeAttemptStarted);
+        yield* advanceToNextAttempt("150 millis");
+        yield* advanceToNextAttempt("350 millis");
         yield* Queue.take(completeAttemptDone);
         const exhaustedRes = yield* Fiber.join(exhaustedFiber);
         trackCompleteAttempts = false;
         failUpdateMode = "none";
         expect(exhaustedRes.status).toBe(503);
         expect(injectedFailures).toBe(3);
+
+        // 7. Persistence failure on Rejected returns 503 (not invalid_grant) without revoking.
+        yield* TestClock.adjust(`${OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000} millis`);
+        refreshBehavior = "bad_refresh_token";
+        failUpdateMode = "fail-all-after-claim";
+        updateCount = 0;
+        injectedFailures = 0;
+        const failedRejectRes = yield* postRefresh(hungDbBody.refresh_token);
+        refreshBehavior = "normal";
+        failUpdateMode = "none";
+        expect(failedRejectRes.status).toBe(503);
+        const [rowAfterFailedReject] = yield* loadSessionRow();
+        expect(rowAfterFailedReject?.revokedAt).toBeNull();
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

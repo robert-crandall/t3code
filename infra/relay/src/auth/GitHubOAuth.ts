@@ -43,12 +43,18 @@ const GITHUB_SCOPES = "read:org user:email";
 // Stay under Api.ts's 9s RELAY_REQUEST_DEADLINE_MS with headroom for DB and signing.
 const GITHUB_REQUEST_TIMEOUT = Duration.seconds(7);
 const GITHUB_REFRESH_REQUEST_TIMEOUT = Duration.seconds(4);
-// Keep the entire uninterruptible refresh+persist critical section (4s + 3*2s + 0.5s = 10.5s)
-// strictly inside OAuthSessions.GITHUB_REFRESH_LEASE_MS (15s).
+// Once HTTP 200 arrives from GitHub (single-use refresh token already consumed), give body
+// decoding its own short timeout so a slow response at 3.99s is never aborted mid-parse.
+const GITHUB_REFRESH_DECODE_TIMEOUT = Duration.seconds(1);
+// Keep the uninterruptible refresh+persist critical section strictly inside
+// OAuthSessions.GITHUB_REFRESH_LEASE_MS (30s), accounting for @effect/sql-pg's 5s query-cancel
+// drain per timed-out attempt (4s HTTP + 1s decode + 3*(2s + 5s) + 0.5s = 26.5s < 30s).
 const GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT = Duration.seconds(2);
 const GITHUB_REFRESH_PERSIST_RETRY_DELAYS = [Duration.millis(150), Duration.millis(350)] as const;
-// Do not burn a single-use GitHub refresh token unless >=5s remain in the 9s request deadline.
-const GITHUB_REFRESH_MAX_ELAPSED_BEFORE_CLAIM_MS = 4_000;
+const GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS = 7_500;
+// Do not burn a single-use GitHub refresh token unless >=6s remain in Api.ts's 9s request
+// deadline (and >=7s before the 10s mobile client timeout) for normal refresh+persist+recheck.
+const GITHUB_REFRESH_MAX_ELAPSED_BEFORE_CLAIM_MS = 3_000;
 const MAX_OAUTH_FORM_BODY_BYTES = 16_384;
 const GITHUB_USER_AGENT = "t3code-relay";
 
@@ -320,12 +326,15 @@ const refreshGitHubAccessToken = Effect.fn("relay.oauth.refresh_github_access_to
         refresh_token: input.githubRefreshToken,
       }),
       httpClient.execute,
+      Effect.timeout(GITHUB_REFRESH_REQUEST_TIMEOUT),
       Effect.flatMap((response) =>
         response.status === 200
-          ? decodeGitHubTokenExchange(response).pipe(Effect.mapError(() => "decode_error" as const))
+          ? decodeGitHubTokenExchange(response).pipe(
+              Effect.timeout(GITHUB_REFRESH_DECODE_TIMEOUT),
+              Effect.mapError(() => "decode_error" as const),
+            )
           : Effect.fail("bad_status" as const),
       ),
-      Effect.timeout(GITHUB_REFRESH_REQUEST_TIMEOUT),
       Effect.option,
     );
 
@@ -1228,10 +1237,11 @@ const handleToken = Effect.gen(function* () {
             );
           }
 
-          // Run the single-use GitHub refresh POST and DB completion uninterruptibly so an outer
-          // request deadline or client disconnect cannot discard rotated tokens mid-flight.
-          // Internal timeouts on both HTTP (4s) and DB attempts (3*2s + 0.5s) keep total runtime
-          // strictly inside the 15s lease window.
+          // Run refresh POST + DB completion uninterruptibly so Api.ts's 9s request deadline cannot
+          // discard rotated tokens mid-flight (Cloudflare isolate kills on disconnect cannot be
+          // shielded without waitUntil). Internal timeouts + lease-margin checks stay inside the
+          // 30s lease even with @effect/sql-pg's 5s query-cancel drain.
+          const claimedLeaseUntilMs = Date.parse(claim.claimedLeaseUntil);
           const exchangeAndPersist = yield* Effect.gen(function* () {
             const refreshed = yield* refreshGitHubAccessToken({
               githubRefreshToken: claim.githubRefreshToken,
@@ -1243,6 +1253,7 @@ const handleToken = Effect.gen(function* () {
                   _tag: "Rejected",
                   sessionId,
                   expectedEncryptedGithubRefreshToken: claim.expectedEncryptedGithubRefreshToken,
+                  claimedLeaseUntil: claim.claimedLeaseUntil,
                 })
                 .pipe(Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT), Effect.result);
               if (
@@ -1308,9 +1319,17 @@ const handleToken = Effect.gen(function* () {
                 break;
               }
               const retryDelay = GITHUB_REFRESH_PERSIST_RETRY_DELAYS[attempt];
-              if (retryDelay !== undefined) {
-                yield* Effect.sleep(retryDelay);
+              if (retryDelay === undefined) {
+                break;
               }
+              const nowMs = (yield* DateTime.now).epochMilliseconds;
+              if (
+                Number.isFinite(claimedLeaseUntilMs) &&
+                nowMs + GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS >= claimedLeaseUntilMs
+              ) {
+                break;
+              }
+              yield* Effect.sleep(retryDelay);
             }
             if (persisted !== "Applied") {
               return {
