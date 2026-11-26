@@ -220,6 +220,7 @@ describe("RelayTokens", () => {
         redirectUri: "http://127.0.0.1:4321/callback",
         codeChallenge: "challenge-1",
         encryptedGithubAccessToken: "v1.nonce.cipher",
+        encryptedGithubRefreshToken: "v1.nonce.refresh-cipher",
         jti: "code-jti-1",
         issuedAtEpochSeconds: 100,
         expiresAtEpochSeconds: 160,
@@ -255,6 +256,7 @@ describe("RelayTokens", () => {
         sub: "github:42",
         jti: "code-jti-1",
         enc_gh: "v1.nonce.cipher",
+        enc_ghr: "v1.nonce.refresh-cipher",
       });
       expect(yield* relayTokens.verifyOAuthDeviceToken({ token: deviceToken })).toMatchObject({
         github_device_code: "gh-device-1",

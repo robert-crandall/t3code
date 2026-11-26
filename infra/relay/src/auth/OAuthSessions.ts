@@ -1,4 +1,4 @@
-import { and, eq, isNull, lt, or } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import * as Context from "effect/Context";
 import * as Aead from "effect/crypto/Aead";
 import * as Digest from "effect/crypto/Digest";
@@ -21,11 +21,33 @@ import * as RelayTokens from "./RelayTokens.ts";
 export const REFRESH_TOKEN_ROLLING_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 export const REFRESH_TOKEN_ABSOLUTE_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
 export const REFRESH_TOKEN_ROTATION_GRACE_WINDOW_MS = 60 * 1_000;
+// Covers the 4s GitHub refresh POST, 5s body decode, and lease-gated DB persist attempts
+// (each up to 2s timeout + 5s @effect/sql-pg abort drain + retry backoff) so a worker is
+// never preempted while persisting a consumed single-use GitHub refresh token.
+export const GITHUB_REFRESH_LEASE_MS = 30 * 1_000;
 const REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS = Math.floor(REFRESH_TOKEN_ABSOLUTE_TTL_MS / 1_000);
 const TOKEN_ENCRYPTION_SALT = new TextEncoder().encode("t3code-relay-oauth-github-token-v1");
 const TOKEN_ENCRYPTION_INFO = new TextEncoder().encode("aes-256-gcm");
 
 const REFRESH_ROTATION_CLOCK_SKEW_TOLERANCE_MS = 5_000;
+
+function githubRefreshTokenAad(sessionId: string, clientId: string): string {
+  return `${sessionId}:${clientId}:github-refresh`;
+}
+
+function formatUtcIso(epochMs: number): string {
+  return DateTime.formatIso(DateTime.makeUnsafe(epochMs));
+}
+
+function revokedSessionValues(nowIso: string) {
+  return {
+    revokedAt: nowIso,
+    encryptedCurrentRefreshToken: null,
+    encryptedGithubRefreshToken: null,
+    githubRefreshLeaseUntil: null,
+    updatedAt: nowIso,
+  } as const;
+}
 
 function isWithinRotationGraceWindow(
   row: { readonly previousTokenHash: string | null; readonly rotatedAt: string | null },
@@ -53,7 +75,15 @@ function isWithinRotationGraceWindow(
 export class OAuthSessionPersistenceError extends Schema.TaggedError<OAuthSessionPersistenceError>()(
   "OAuthSessionPersistenceError",
   {
-    operation: Schema.Literals(["create", "inspect", "rotate", "revoke", "prune-expired"]),
+    operation: Schema.Literals([
+      "create",
+      "inspect",
+      "rotate",
+      "revoke",
+      "prune-expired",
+      "claim-github-refresh",
+      "complete-github-refresh",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -92,11 +122,54 @@ export type InspectOAuthSessionResult =
       readonly _tag: "Ready";
       readonly session: OAuthSessionIdentity;
       readonly githubAccessToken: string;
+      readonly encryptedGithubAccessToken: string;
+      readonly hasGithubRefreshToken: boolean;
     }
   | {
       readonly _tag: "InvalidGrant";
       readonly reason: InvalidGrantReason;
     };
+
+export type ClaimGitHubRefreshResult =
+  | {
+      readonly _tag: "Claimed";
+      readonly githubRefreshToken: string;
+      readonly expectedEncryptedGithubRefreshToken: string;
+      readonly claimedLeaseUntil: string;
+    }
+  | {
+      readonly _tag: "AlreadyRefreshed";
+      readonly githubAccessToken: string;
+      readonly encryptedGithubAccessToken: string;
+    }
+  | { readonly _tag: "InFlight" }
+  | { readonly _tag: "NoRefreshToken" }
+  | { readonly _tag: "InvalidGrant"; readonly reason: InvalidGrantReason };
+
+export type CompleteGitHubRefreshInput =
+  | {
+      readonly _tag: "Succeeded";
+      readonly sessionId: string;
+      readonly clientId: string;
+      readonly expectedEncryptedGithubRefreshToken: string;
+      readonly githubAccessToken: string;
+      readonly githubRefreshToken?: string | null;
+    }
+  | {
+      readonly _tag: "TransientFailure";
+      readonly sessionId: string;
+      readonly claimedLeaseUntil: string;
+    }
+  | {
+      readonly _tag: "Rejected";
+      readonly sessionId: string;
+      readonly expectedEncryptedGithubRefreshToken: string;
+      readonly claimedLeaseUntil: string;
+    };
+
+export type CompleteGitHubRefreshResult =
+  | { readonly _tag: "Applied" }
+  | { readonly _tag: "Superseded" };
 
 export type RotateOAuthSessionResult =
   | {
@@ -120,6 +193,7 @@ export class OAuthSessions extends Context.Service<
       readonly email?: string;
       readonly clientId: string;
       readonly githubAccessToken: string;
+      readonly githubRefreshToken?: string | null;
       readonly authCodeJti?: string;
       readonly authCodeExpiresAt?: string;
     }) => Effect.Effect<CreateOAuthSessionResult, OAuthSessionPersistenceError>;
@@ -127,6 +201,14 @@ export class OAuthSessions extends Context.Service<
       readonly refreshToken: string;
       readonly clientId: string;
     }) => Effect.Effect<InspectOAuthSessionResult, OAuthSessionPersistenceError>;
+    readonly claimGitHubRefresh: (input: {
+      readonly sessionId: string;
+      readonly clientId: string;
+      readonly expectedEncryptedGithubAccessToken: string;
+    }) => Effect.Effect<ClaimGitHubRefreshResult, OAuthSessionPersistenceError>;
+    readonly completeGitHubRefresh: (
+      input: CompleteGitHubRefreshInput,
+    ) => Effect.Effect<CompleteGitHubRefreshResult, OAuthSessionPersistenceError>;
     readonly rotate: (input: {
       readonly refreshToken: string;
       readonly clientId: string;
@@ -259,6 +341,15 @@ const make = Effect.gen(function* () {
         input.githubAccessToken,
         `${sessionId}:${input.clientId}`,
       );
+      const encryptedGithubRefreshToken =
+        input.githubRefreshToken !== undefined &&
+        input.githubRefreshToken !== null &&
+        input.githubRefreshToken.length > 0
+          ? yield* sealSecret(
+              input.githubRefreshToken,
+              githubRefreshTokenAad(sessionId, input.clientId),
+            )
+          : null;
 
       const values = {
         id: sessionId,
@@ -271,6 +362,8 @@ const make = Effect.gen(function* () {
         githubLogin: input.githubLogin,
         email: input.email ?? null,
         encryptedGithubAccessToken,
+        encryptedGithubRefreshToken,
+        githubRefreshLeaseUntil: null,
         clientId: input.clientId,
         rotatedAt: null,
         revokedAt: null,
@@ -350,7 +443,7 @@ const make = Effect.gen(function* () {
       ) {
         yield* db
           .update(relayOauthSessions)
-          .set({ revokedAt: nowIso, updatedAt: nowIso })
+          .set(revokedSessionValues(nowIso))
           .where(and(eq(relayOauthSessions.id, row.id), isNull(relayOauthSessions.revokedAt)));
         return { _tag: "InvalidGrant", reason: "replayed" } as const;
       }
@@ -384,9 +477,193 @@ const make = Effect.gen(function* () {
           clientId: row.clientId,
         },
         githubAccessToken: githubAccessToken.value,
+        encryptedGithubAccessToken: row.encryptedGithubAccessToken,
+        hasGithubRefreshToken: row.encryptedGithubRefreshToken !== null,
       } as const;
     },
     Effect.mapError((cause) => new OAuthSessionPersistenceError({ operation: "inspect", cause })),
+  );
+
+  const claimGitHubRefresh: OAuthSessions["Service"]["claimGitHubRefresh"] = Effect.fn(
+    "relay.oauth_sessions.claim_github_refresh",
+  )(
+    function* (input) {
+      const now = yield* DateTime.now;
+      const nowIso = DateTime.formatIso(now);
+      const leaseUntilIso = formatUtcIso(now.epochMilliseconds + GITHUB_REFRESH_LEASE_MS);
+
+      const claimed = yield* db
+        .update(relayOauthSessions)
+        .set({
+          githubRefreshLeaseUntil: leaseUntilIso,
+          updatedAt: nowIso,
+        })
+        .where(
+          and(
+            eq(relayOauthSessions.id, input.sessionId),
+            eq(relayOauthSessions.clientId, input.clientId),
+            isNull(relayOauthSessions.revokedAt),
+            eq(
+              relayOauthSessions.encryptedGithubAccessToken,
+              input.expectedEncryptedGithubAccessToken,
+            ),
+            isNotNull(relayOauthSessions.encryptedGithubRefreshToken),
+            or(
+              isNull(relayOauthSessions.githubRefreshLeaseUntil),
+              lte(relayOauthSessions.githubRefreshLeaseUntil, nowIso),
+            ),
+          ),
+        )
+        .returning({
+          encryptedGithubRefreshToken: relayOauthSessions.encryptedGithubRefreshToken,
+        });
+
+      const claimedRow = claimed[0];
+      if (claimedRow !== undefined) {
+        if (claimedRow.encryptedGithubRefreshToken === null) {
+          return { _tag: "NoRefreshToken" } as const;
+        }
+        const openedRefreshToken = yield* openSecret(
+          claimedRow.encryptedGithubRefreshToken,
+          githubRefreshTokenAad(input.sessionId, input.clientId),
+        );
+        if (Option.isNone(openedRefreshToken)) {
+          return { _tag: "InvalidGrant", reason: "revoked" } as const;
+        }
+        return {
+          _tag: "Claimed",
+          githubRefreshToken: openedRefreshToken.value,
+          expectedEncryptedGithubRefreshToken: claimedRow.encryptedGithubRefreshToken,
+          claimedLeaseUntil: leaseUntilIso,
+        } as const;
+      }
+
+      const rows = yield* db
+        .select()
+        .from(relayOauthSessions)
+        .where(eq(relayOauthSessions.id, input.sessionId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) {
+        return { _tag: "InvalidGrant", reason: "not_found" } as const;
+      }
+      if (row.clientId !== input.clientId) {
+        return { _tag: "InvalidGrant", reason: "client_mismatch" } as const;
+      }
+      if (row.revokedAt !== null) {
+        return { _tag: "InvalidGrant", reason: "revoked" } as const;
+      }
+      if (row.encryptedGithubAccessToken !== input.expectedEncryptedGithubAccessToken) {
+        const openedAccessToken = yield* openSecret(
+          row.encryptedGithubAccessToken,
+          `${row.id}:${row.clientId}`,
+        );
+        if (Option.isNone(openedAccessToken)) {
+          return { _tag: "InvalidGrant", reason: "revoked" } as const;
+        }
+        return {
+          _tag: "AlreadyRefreshed",
+          githubAccessToken: openedAccessToken.value,
+          encryptedGithubAccessToken: row.encryptedGithubAccessToken,
+        } as const;
+      }
+      if (row.encryptedGithubRefreshToken === null) {
+        return { _tag: "NoRefreshToken" } as const;
+      }
+      return { _tag: "InFlight" } as const;
+    },
+    Effect.mapError(
+      (cause) => new OAuthSessionPersistenceError({ operation: "claim-github-refresh", cause }),
+    ),
+  );
+
+  const completeGitHubRefresh: OAuthSessions["Service"]["completeGitHubRefresh"] = Effect.fn(
+    "relay.oauth_sessions.complete_github_refresh",
+  )(
+    function* (input) {
+      const nowIso = DateTime.formatIso(yield* DateTime.now);
+      switch (input._tag) {
+        case "Succeeded": {
+          const encryptedGithubAccessToken = yield* sealSecret(
+            input.githubAccessToken,
+            `${input.sessionId}:${input.clientId}`,
+          );
+          const encryptedGithubRefreshToken =
+            input.githubRefreshToken !== undefined &&
+            input.githubRefreshToken !== null &&
+            input.githubRefreshToken.length > 0
+              ? yield* sealSecret(
+                  input.githubRefreshToken,
+                  githubRefreshTokenAad(input.sessionId, input.clientId),
+                )
+              : null;
+          const updated = yield* db
+            .update(relayOauthSessions)
+            .set({
+              encryptedGithubAccessToken,
+              encryptedGithubRefreshToken,
+              githubRefreshLeaseUntil: null,
+              updatedAt: nowIso,
+            })
+            .where(
+              and(
+                eq(relayOauthSessions.id, input.sessionId),
+                eq(relayOauthSessions.clientId, input.clientId),
+                isNull(relayOauthSessions.revokedAt),
+                eq(
+                  relayOauthSessions.encryptedGithubRefreshToken,
+                  input.expectedEncryptedGithubRefreshToken,
+                ),
+              ),
+            )
+            .returning({ id: relayOauthSessions.id });
+          return updated.length > 0
+            ? ({ _tag: "Applied" } as const)
+            : ({ _tag: "Superseded" } as const);
+        }
+        case "TransientFailure": {
+          const updated = yield* db
+            .update(relayOauthSessions)
+            .set({
+              githubRefreshLeaseUntil: null,
+              updatedAt: nowIso,
+            })
+            .where(
+              and(
+                eq(relayOauthSessions.id, input.sessionId),
+                eq(relayOauthSessions.githubRefreshLeaseUntil, input.claimedLeaseUntil),
+              ),
+            )
+            .returning({ id: relayOauthSessions.id });
+          return updated.length > 0
+            ? ({ _tag: "Applied" } as const)
+            : ({ _tag: "Superseded" } as const);
+        }
+        case "Rejected": {
+          const updated = yield* db
+            .update(relayOauthSessions)
+            .set(revokedSessionValues(nowIso))
+            .where(
+              and(
+                eq(relayOauthSessions.id, input.sessionId),
+                isNull(relayOauthSessions.revokedAt),
+                eq(
+                  relayOauthSessions.encryptedGithubRefreshToken,
+                  input.expectedEncryptedGithubRefreshToken,
+                ),
+                eq(relayOauthSessions.githubRefreshLeaseUntil, input.claimedLeaseUntil),
+              ),
+            )
+            .returning({ id: relayOauthSessions.id });
+          return updated.length > 0
+            ? ({ _tag: "Applied" } as const)
+            : ({ _tag: "Superseded" } as const);
+        }
+      }
+    },
+    Effect.mapError(
+      (cause) => new OAuthSessionPersistenceError({ operation: "complete-github-refresh", cause }),
+    ),
   );
 
   const rotate: OAuthSessions["Service"]["rotate"] = Effect.fn("relay.oauth_sessions.rotate")(
@@ -432,11 +709,7 @@ const make = Effect.gen(function* () {
           if (!isCurrentToken && !isGraceRetry) {
             yield* db
               .update(relayOauthSessions)
-              .set({
-                revokedAt: nowIso,
-                encryptedCurrentRefreshToken: null,
-                updatedAt: nowIso,
-              })
+              .set(revokedSessionValues(nowIso))
               .where(eq(relayOauthSessions.id, row.id));
             return { _tag: "InvalidGrant", reason: "replayed" } as const;
           }
@@ -477,11 +750,7 @@ const make = Effect.gen(function* () {
             }
             yield* db
               .update(relayOauthSessions)
-              .set({
-                revokedAt: nowIso,
-                encryptedCurrentRefreshToken: null,
-                updatedAt: nowIso,
-              })
+              .set(revokedSessionValues(nowIso))
               .where(eq(relayOauthSessions.id, row.id));
             return { _tag: "InvalidGrant", reason: "replayed" } as const;
           }
@@ -548,7 +817,7 @@ const make = Effect.gen(function* () {
 
       yield* db
         .update(relayOauthSessions)
-        .set({ revokedAt: nowIso, encryptedCurrentRefreshToken: null, updatedAt: nowIso })
+        .set(revokedSessionValues(nowIso))
         .where(condition)
         .pipe(
           Effect.mapError(
@@ -564,7 +833,7 @@ const make = Effect.gen(function* () {
     const nowIso = DateTime.formatIso(yield* DateTime.now);
     yield* db
       .update(relayOauthSessions)
-      .set({ revokedAt: nowIso, encryptedCurrentRefreshToken: null, updatedAt: nowIso })
+      .set(revokedSessionValues(nowIso))
       .where(and(eq(relayOauthSessions.id, sessionId), isNull(relayOauthSessions.revokedAt)))
       .pipe(
         Effect.mapError(
@@ -600,6 +869,8 @@ const make = Effect.gen(function* () {
     openSecret,
     create,
     inspectForRefresh,
+    claimGitHubRefresh,
+    completeGitHubRefresh,
     rotate,
     revoke,
     revokeById,

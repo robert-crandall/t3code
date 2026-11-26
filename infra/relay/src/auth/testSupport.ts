@@ -100,23 +100,28 @@ export const setupPgliteOAuthTest = Effect.fn("setupPgliteOAuthTest")(function* 
     update: (table: typeof relayOauthSessions) => ({
       set: (values: Partial<typeof relayOauthSessions.$inferInsert>) => ({
         where: (condition: unknown) => {
-          if (options?.failUpdate?.()) {
-            // Inside a transaction, execute the write before failing so tests verify ROLLBACK reverts it.
-            return inTx
-              ? Effect.promise(() =>
-                  db
-                    .update(table)
-                    .set(values)
-                    .where(condition as never),
-                ).pipe(Effect.andThen(Effect.fail(new InjectedPersistenceError())))
-              : Effect.fail(new InjectedPersistenceError());
-          }
-          return Effect.promise(() =>
-            db
-              .update(table)
-              .set(values)
-              .where(condition as never),
-          );
+          const runUpdate = (returningCols?: Record<string, unknown>) =>
+            Effect.suspend(() => {
+              const execute = () => {
+                const query = db
+                  .update(table)
+                  .set(values)
+                  .where(condition as never);
+                return returningCols ? query.returning(returningCols as never) : query;
+              };
+              if (options?.failUpdate?.()) {
+                // Inside a transaction, execute the write before failing so tests verify ROLLBACK reverts it.
+                return inTx
+                  ? Effect.promise(execute).pipe(
+                      Effect.andThen(Effect.fail(new InjectedPersistenceError())),
+                    )
+                  : Effect.fail(new InjectedPersistenceError());
+              }
+              return Effect.promise(execute);
+            });
+          return Object.assign(runUpdate(), {
+            returning: (cols: Record<string, unknown>) => runUpdate(cols),
+          });
         },
       }),
     }),

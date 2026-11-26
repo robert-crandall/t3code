@@ -214,6 +214,8 @@ export const relayOauthSessions = pgTable(
     githubLogin: varchar("github_login", { length: 191 }).notNull(),
     email: text("email"),
     encryptedGithubAccessToken: text("encrypted_github_access_token").notNull(),
+    encryptedGithubRefreshToken: text("encrypted_github_refresh_token"),
+    githubRefreshLeaseUntil: varchar("github_refresh_lease_until", { length: 64 }),
     clientId: varchar("client_id", { length: 64 }).notNull(),
     rotatedAt: varchar("rotated_at", { length: 64 }),
     revokedAt: varchar("revoked_at", { length: 64 }),
