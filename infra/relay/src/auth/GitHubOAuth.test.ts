@@ -18,9 +18,12 @@ import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 
+import { traceRelayHttpRequestWith } from "../http/Api.ts";
 import { relayOauthSessions } from "../persistence/schema.ts";
 import * as GitHubOAuth from "./GitHubOAuth.ts";
 import * as OAuthSessions from "./OAuthSessions.ts";
@@ -1603,7 +1606,10 @@ describe("GitHubOAuth", () => {
         let refreshVersion = 1;
         let pauseRefreshStarted: Deferred.Deferred<void> | null = null;
         let releasePausedRefresh: Deferred.Deferred<void> | null = null;
-        let refreshBehavior: "normal" | "hang" | "bad_refresh_token" = "normal";
+        let slowBodyStarted: Deferred.Deferred<void> | null = null;
+        const slowBodyGate: { release: (() => void) | null } = { release: null };
+        let refreshBehavior: "normal" | "hang" | "slow_body" | "hang_body" | "bad_refresh_token" =
+          "normal";
 
         const mockHttpClient = HttpClient.make(
           Effect.fnUntraced(function* (request) {
@@ -1615,6 +1621,44 @@ describe("GitHubOAuth", () => {
               }
               if (refreshBehavior === "hang") {
                 return yield* Effect.never;
+              }
+              if (refreshBehavior === "slow_body" || refreshBehavior === "hang_body") {
+                const mode = refreshBehavior;
+                const nextVersion = refreshVersion + 1;
+                if (mode === "slow_body") {
+                  refreshVersion = nextVersion;
+                }
+                const started = slowBodyStarted;
+                const bodyReleased = new Promise<void>((resolve) => {
+                  slowBodyGate.release = resolve;
+                });
+                const stream = new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    if (started) {
+                      Deferred.doneUnsafe(started, Exit.void);
+                    }
+                    if (mode === "slow_body") {
+                      void bodyReleased.then(() => {
+                        controller.enqueue(
+                          new TextEncoder().encode(
+                            JSON.stringify({
+                              access_token: `ghu_fault_${nextVersion}`,
+                              refresh_token: `ghr_fault_${nextVersion}`,
+                            }),
+                          ),
+                        );
+                        controller.close();
+                      });
+                    }
+                  },
+                });
+                return HttpClientResponse.fromWeb(
+                  request,
+                  new Response(stream, {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                  }),
+                );
               }
               if (refreshBehavior === "bad_refresh_token") {
                 return HttpClientResponse.fromWeb(
@@ -1652,6 +1696,9 @@ describe("GitHubOAuth", () => {
         let completeAttemptCostMs = 0;
         let completeAttemptsStarted = 0;
         let trackCompleteAttempts = false;
+        const observedCompleteScopes = new Set<Scope.Scope>();
+        const closedCompleteScopes = new Set<Scope.Scope>();
+        let trackCompleteScopes = false;
         const completeAttemptDone = yield* Queue.unbounded<void>();
         const completeAttemptStarted = yield* Queue.unbounded<void>();
         const wrappedSessionsLayer = Layer.effect(
@@ -1669,6 +1716,18 @@ describe("GitHubOAuth", () => {
               }),
               completeGitHubRefresh: Effect.fnUntraced(function* (input) {
                 completeAttemptsStarted += 1;
+                if (trackCompleteScopes) {
+                  const scope = yield* Effect.serviceOption(Scope.Scope);
+                  if (Option.isSome(scope) && !observedCompleteScopes.has(scope.value)) {
+                    observedCompleteScopes.add(scope.value);
+                    yield* Scope.addFinalizer(
+                      scope.value,
+                      Effect.sync(() => {
+                        closedCompleteScopes.add(scope.value);
+                      }),
+                    );
+                  }
+                }
                 if (trackCompleteAttempts) {
                   yield* Queue.offer(completeAttemptStarted, undefined);
                 }
@@ -1747,6 +1806,25 @@ describe("GitHubOAuth", () => {
             ),
           );
 
+        const postRefreshWithDeadline = (refreshToken: string) =>
+          traceRelayHttpRequestWith(httpEffect, Layer.empty).pipe(
+            Effect.provideService(Cloudflare.WorkerExecutionContext, mockWorkerExecCtx),
+            Effect.provideService(
+              HttpServerRequest.HttpServerRequest,
+              HttpServerRequest.fromWeb(
+                new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                  method: "POST",
+                  headers: { "content-type": "application/x-www-form-urlencoded" },
+                  body: new URLSearchParams({
+                    grant_type: "refresh_token",
+                    client_id: "t3-cli",
+                    refresh_token: refreshToken,
+                  }),
+                }),
+              ),
+            ),
+          );
+
         const readRefreshToken = (res: HttpServerResponse.HttpServerResponse) =>
           Effect.promise(
             () => HttpServerResponse.toWeb(res).json() as Promise<{ refresh_token: string }>,
@@ -1808,8 +1886,8 @@ describe("GitHubOAuth", () => {
         expect(refreshPostCount).toBe(1);
         const reuseBody = yield* readRefreshToken(reuseRes);
 
-        // 3. Outer interruption mid-refresh pins work to WorkerExecutionContext.waitUntil
-        // and persists rotated tokens before settling the waitUntil promise.
+        // 3. Outer interruption mid-refresh interrupts the request fiber immediately while
+        // the detached task stays pinned to WorkerExecutionContext.waitUntil and persists tokens.
         refreshVersion += 1; // expire ghu_fault_2 so next call hits 401 -> refresh to ghu_fault_4
         waitUntilPromises.length = 0;
         pauseRefreshStarted = yield* Deferred.make<void>();
@@ -1819,17 +1897,15 @@ describe("GitHubOAuth", () => {
         expect(waitUntilPromises).toHaveLength(1);
         expect(waitUntilPromises[0]?.settled).toBe(false);
 
-        const interruptWaiter = yield* Effect.forkChild(Fiber.interrupt(interruptedFiber));
-        yield* Effect.yieldNow;
-        expect(waitUntilPromises[0]?.settled).toBe(false);
-        yield* Deferred.succeed(releasePausedRefresh, undefined);
-        yield* Fiber.join(interruptWaiter);
-        yield* Effect.promise(() => waitUntilPromises[0]!.promise);
-        expect(waitUntilPromises[0]?.settled).toBe(true);
+        yield* Fiber.interrupt(interruptedFiber);
         const interruptedExit = yield* Fiber.await(interruptedFiber);
         expect(Exit.isFailure(interruptedExit) && Cause.hasInterrupts(interruptedExit.cause)).toBe(
           true,
         );
+        expect(waitUntilPromises[0]?.settled).toBe(false);
+        yield* Deferred.succeed(releasePausedRefresh, undefined);
+        yield* Effect.promise(() => waitUntilPromises[0]!.promise);
+        expect(waitUntilPromises[0]?.settled).toBe(true);
         pauseRefreshStarted = null;
         releasePausedRefresh = null;
 
@@ -1844,7 +1920,7 @@ describe("GitHubOAuth", () => {
         expect(refreshPostCount).toBe(2);
         const afterInterruptBody = yield* readRefreshToken(afterInterruptRes);
 
-        // 4. Hung GitHub refresh POST times out at 4s inside Effect.uninterruptible and releases lease.
+        // 4. Hung GitHub refresh POST times out at 4s inside the detached task and releases lease.
         refreshVersion += 1; // expire ghu_fault_4
         refreshBehavior = "hang";
         pauseRefreshStarted = yield* Deferred.make<void>();
@@ -1864,7 +1940,7 @@ describe("GitHubOAuth", () => {
         expect(rowAfterHungHttp?.githubRefreshLeaseUntil).toBeNull();
         expect(rowAfterHungHttp?.revokedAt).toBeNull();
 
-        // 5. Hung first completeGitHubRefresh attempt times out at 2s inside Effect.uninterruptible,
+        // 5. Hung first completeGitHubRefresh attempt times out at 2s inside the detached task,
         // then retries after backoff and persists rotated tokens cleanly.
         hangFirstComplete = true;
         completeAttemptsStarted = 0;
@@ -1880,7 +1956,8 @@ describe("GitHubOAuth", () => {
         expect(hungDbRes.status).toBe(200);
         const hungDbBody = yield* readRefreshToken(hungDbRes);
 
-        // 6. Exhausting all 5 persistence attempts (150ms, 350ms, 1s, 2s) returns 503.
+        // 6. Immediate DB failures continue retrying with capped 2s backoff until the lease-margin
+        // guard stops them (150ms, 350ms, 1s, then ten 2s delays = 21.5s elapsed on a 30s lease).
         refreshVersion += 1; // expire latest token
         failUpdateMode = "fail-all-after-claim";
         updateCount = 0;
@@ -1892,13 +1969,15 @@ describe("GitHubOAuth", () => {
         yield* advanceToNextAttempt("150 millis");
         yield* advanceToNextAttempt("350 millis");
         yield* advanceToNextAttempt("1 seconds");
-        yield* advanceToNextAttempt("2 seconds");
+        for (let cappedRetry = 0; cappedRetry < 10; cappedRetry++) {
+          yield* advanceToNextAttempt("2 seconds");
+        }
         yield* Queue.take(completeAttemptDone);
         const exhaustedRes = yield* Fiber.join(exhaustedFiber);
         trackCompleteAttempts = false;
         failUpdateMode = "none";
         expect(exhaustedRes.status).toBe(503);
-        expect(injectedFailures).toBe(5);
+        expect(injectedFailures).toBe(14);
 
         // 7. Lease-margin guard accounts for retryDelay and stops retries before outliving the 30s lease.
         yield* TestClock.adjust(`${OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000} millis`);
@@ -1932,6 +2011,125 @@ describe("GitHubOAuth", () => {
         expect(failedRejectRes.status).toBe(503);
         const [rowAfterFailedReject] = yield* loadSessionRow();
         expect(rowAfterFailedReject?.revokedAt).toBeNull();
+
+        // 9. Through Api.ts's 9s traceRelayHttpRequestWith deadline wrapper, a 9.5s DB outage
+        // returns 504 right at 9s while the detached waitUntil task runs in its own Scope
+        // (unaffected by closing the request Scope after 504), keeps retrying, and persists
+        // the rotated GitHub tokens when the DB recovers at 9.5s.
+        yield* TestClock.adjust(`${OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000} millis`);
+        waitUntilPromises.length = 0;
+        observedCompleteScopes.clear();
+        closedCompleteScopes.clear();
+        failUpdateMode = "fail-all-after-claim";
+        updateCount = 0;
+        injectedFailures = 0;
+        completeAttemptsStarted = 0;
+        trackCompleteAttempts = true;
+        trackCompleteScopes = true;
+        const requestScope = yield* Scope.make();
+        let requestScopeClosed = false;
+        yield* Scope.addFinalizer(
+          requestScope,
+          Effect.sync(() => {
+            requestScopeClosed = true;
+          }),
+        );
+        const refreshPostsBeforeDeadline = refreshPostCount;
+        const deadlineFiber = yield* Effect.forkChild(
+          postRefreshWithDeadline(hungDbBody.refresh_token).pipe(Scope.provide(requestScope)),
+        );
+        yield* Queue.take(completeAttemptStarted);
+        yield* advanceToNextAttempt("150 millis");
+        yield* advanceToNextAttempt("350 millis");
+        yield* advanceToNextAttempt("1 seconds");
+        yield* advanceToNextAttempt("2 seconds");
+        yield* advanceToNextAttempt("2 seconds");
+        yield* advanceToNextAttempt("2 seconds");
+        yield* Queue.take(completeAttemptDone);
+        // Drain scheduler so the background task enters its 2s sleep (until t = 9.5s),
+        // then advance 1.5s to hit Api.ts's 9.0s deadline.
+        yield* TestClock.adjust("0 millis");
+        yield* TestClock.adjust("1500 millis");
+        const deadlineRes = yield* Fiber.join(deadlineFiber);
+        expect(deadlineRes.status).toBe(504);
+        const deadlineBody = yield* Effect.promise(
+          () => HttpServerResponse.toWeb(deadlineRes).json() as Promise<{ error: string }>,
+        );
+        expect(deadlineBody).toEqual({ error: "relay_request_deadline_exceeded" });
+        expect(waitUntilPromises).toHaveLength(1);
+        expect(waitUntilPromises[0]?.settled).toBe(false);
+
+        // Simulate WorkerBridge closing the HTTP request Scope right after the 504 resolves.
+        yield* Scope.close(requestScope, Exit.void);
+        expect(requestScopeClosed).toBe(true);
+        expect(observedCompleteScopes.size).toBe(1);
+        const [detachedScope] = observedCompleteScopes;
+        expect(detachedScope).not.toBe(requestScope);
+        expect(closedCompleteScopes.has(detachedScope!)).toBe(false);
+
+        // DB recovers at 9.5s: the detached waitUntil task finishes persisting rotated tokens
+        // in its still-open Scope, then closes that Scope cleanly on exit.
+        failUpdateMode = "none";
+        yield* TestClock.adjust("500 millis");
+        yield* Queue.take(completeAttemptStarted);
+        yield* Queue.take(completeAttemptDone);
+        trackCompleteAttempts = false;
+        trackCompleteScopes = false;
+        yield* Effect.promise(() => waitUntilPromises[0]!.promise);
+        expect(waitUntilPromises[0]?.settled).toBe(true);
+        expect(closedCompleteScopes.has(detachedScope!)).toBe(true);
+        expect(refreshPostCount).toBe(refreshPostsBeforeDeadline + 1);
+        const [rowAfterDeadline] = yield* loadSessionRow();
+        expect(rowAfterDeadline?.githubRefreshLeaseUntil).toBeNull();
+        expect(rowAfterDeadline?.revokedAt).toBeNull();
+
+        // Subsequent client retry succeeds immediately using the persisted rotated token.
+        const recoveredAfterDeadlineRes = yield* postRefresh(hungDbBody.refresh_token);
+        expect(recoveredAfterDeadlineRes.status).toBe(200);
+        expect(refreshPostCount).toBe(refreshPostsBeforeDeadline + 1);
+        const recoveredAfterDeadlineBody = yield* readRefreshToken(recoveredAfterDeadlineRes);
+
+        // 10. Slow HTTP 200 body completing at 4.5s (past 4s request timeout, within 5s decode
+        // timeout) still decodes and persists rotated tokens.
+        refreshVersion += 1;
+        refreshBehavior = "slow_body";
+        slowBodyStarted = yield* Deferred.make<void>();
+        const slowBodyFiber = yield* Effect.forkChild(
+          postRefresh(recoveredAfterDeadlineBody.refresh_token),
+        );
+        yield* Deferred.await(slowBodyStarted);
+        yield* TestClock.adjust("4500 millis");
+        expect(slowBodyGate.release).not.toBeNull();
+        slowBodyGate.release?.();
+        const slowBodyRes = yield* Fiber.join(slowBodyFiber);
+        refreshBehavior = "normal";
+        slowBodyStarted = null;
+        slowBodyGate.release = null;
+        expect(slowBodyRes.status).toBe(200);
+        const slowBodyTokens = yield* readRefreshToken(slowBodyRes);
+        const refreshPostsAfterSlowBody = refreshPostCount;
+        const reuseSlowBodyRes = yield* postRefresh(slowBodyTokens.refresh_token);
+        expect(reuseSlowBodyRes.status).toBe(200);
+        expect(refreshPostCount).toBe(refreshPostsAfterSlowBody);
+        const reuseSlowBodyTokens = yield* readRefreshToken(reuseSlowBodyRes);
+
+        // 11. Stalled HTTP 200 body exceeding the 5s decode timeout returns 503 and releases lease.
+        refreshVersion += 1;
+        refreshBehavior = "hang_body";
+        slowBodyStarted = yield* Deferred.make<void>();
+        const hangBodyFiber = yield* Effect.forkChild(
+          postRefresh(reuseSlowBodyTokens.refresh_token),
+        );
+        yield* Deferred.await(slowBodyStarted);
+        yield* TestClock.adjust("5 seconds");
+        const hangBodyRes = yield* Fiber.join(hangBodyFiber);
+        refreshBehavior = "normal";
+        slowBodyStarted = null;
+        slowBodyGate.release = null;
+        expect(hangBodyRes.status).toBe(503);
+        const [rowAfterHangBody] = yield* loadSessionRow();
+        expect(rowAfterHangBody?.githubRefreshLeaseUntil).toBeNull();
+        expect(rowAfterHangBody?.revokedAt).toBeNull();
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });
