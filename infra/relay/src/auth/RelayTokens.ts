@@ -100,6 +100,7 @@ const OAuthCodeTokenClaims = Schema.Struct({
   preferred_username: Schema.String,
   email: Schema.optional(Schema.String),
   enc_gh: Schema.String,
+  enc_ghr: Schema.optional(Schema.String),
   client_id: Schema.String,
   redirect_uri: Schema.String,
   code_challenge: Schema.String,
@@ -218,6 +219,7 @@ export class RelayTokens extends Context.Service<
       readonly githubLogin: string;
       readonly email?: string;
       readonly encryptedGithubAccessToken: string;
+      readonly encryptedGithubRefreshToken?: string;
       readonly clientId: string;
       readonly redirectUri: string;
       readonly codeChallenge: string;
@@ -451,6 +453,9 @@ const make = Effect.gen(function* () {
         preferred_username: input.githubLogin,
         ...(input.email ? { email: input.email } : {}),
         enc_gh: input.encryptedGithubAccessToken,
+        ...(input.encryptedGithubRefreshToken
+          ? { enc_ghr: input.encryptedGithubRefreshToken }
+          : {}),
         client_id: input.clientId,
         redirect_uri: input.redirectUri,
         code_challenge: input.codeChallenge,

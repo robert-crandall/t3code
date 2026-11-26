@@ -1,6 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHash sync helper.
 import * as NodeCrypto from "node:crypto";
 
+import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { eq } from "drizzle-orm";
@@ -1457,20 +1458,95 @@ describe("GitHubOAuth", () => {
         expect(fastRes.status).toBe(200);
         expect(refreshPostCount).toBe(1);
 
-        // 2. Legacy pre-deploy raw-string enc_gh authorization code still exchanges cleanly.
+        // 2. Auth codes keep raw access token in enc_gh and optional refresh token in enc_ghr.
         const verifier = "legacy-code-verifier-0123456789abcdefghijklmnopqrstuvwxyz";
         const redirectUri = "http://127.0.0.1:43219/callback";
-        const legacyCode = yield* Effect.gen(function* () {
+        const { legacyCode, splitCode, rawEncGh } = yield* Effect.gen(function* () {
           const sessions = yield* OAuthSessions.OAuthSessions;
           const relayTokens = yield* RelayTokens.RelayTokens;
           const now = yield* DateTime.now;
           const iat = Math.floor(now.epochMilliseconds / 1_000);
-          const jti = "legacy-jti-1";
-          const encGh = yield* sessions.sealSecret("gho_legacy_raw", `code:${jti}:t3-cli`);
+          const legacyJti = "legacy-jti-1";
+          const legacyEncGh = yield* sessions.sealSecret(
+            "gho_legacy_raw",
+            `code:${legacyJti}:t3-cli`,
+          );
+          const legacyCode = yield* relayTokens.issueOAuthCodeToken({
+            userId: "github:42",
+            githubLogin: "robert-crandall",
+            encryptedGithubAccessToken: legacyEncGh,
+            clientId: "t3-cli",
+            redirectUri,
+            codeChallenge: pkceChallenge(verifier),
+            jti: legacyJti,
+            issuedAtEpochSeconds: iat,
+            expiresAtEpochSeconds: iat + 60,
+          });
+          const splitJti = "split-jti-1";
+          const splitEncGh = yield* sessions.sealSecret("ghu_split_raw", `code:${splitJti}:t3-cli`);
+          const splitEncGhr = yield* sessions.sealSecret(
+            "ghr_split_raw",
+            `code:${splitJti}:t3-cli:github-refresh`,
+          );
+          const splitCode = yield* relayTokens.issueOAuthCodeToken({
+            userId: "github:42",
+            githubLogin: "robert-crandall",
+            encryptedGithubAccessToken: splitEncGh,
+            encryptedGithubRefreshToken: splitEncGhr,
+            clientId: "t3-cli",
+            redirectUri,
+            codeChallenge: pkceChallenge(verifier),
+            jti: splitJti,
+            issuedAtEpochSeconds: iat,
+            expiresAtEpochSeconds: iat + 60,
+          });
+          const verifiedSplit = yield* relayTokens.verifyOAuthCodeToken({ token: splitCode });
+          const openedEncGh = verifiedSplit
+            ? yield* sessions.openSecret(verifiedSplit.enc_gh, `code:${splitJti}:t3-cli`)
+            : null;
+          return {
+            legacyCode,
+            splitCode,
+            rawEncGh: openedEncGh?._tag === "Some" ? openedEncGh.value : null,
+          };
+        }).pipe(Effect.provide(layerAuth));
+        expect(rawEncGh).toBe("ghu_split_raw");
+
+        for (const code of [legacyCode, splitCode]) {
+          const exchangeRes = yield* httpEffect.pipe(
+            Effect.provideService(
+              HttpServerRequest.HttpServerRequest,
+              HttpServerRequest.fromWeb(
+                new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                  method: "POST",
+                  headers: { "content-type": "application/x-www-form-urlencoded" },
+                  body: new URLSearchParams({
+                    grant_type: "authorization_code",
+                    client_id: "t3-cli",
+                    code,
+                    redirect_uri: redirectUri,
+                    code_verifier: verifier,
+                  }),
+                }),
+              ),
+            ),
+          );
+          expect(exchangeRes.status).toBe(200);
+        }
+
+        // Tampered enc_ghr fails closed with invalid_grant instead of silently dropping refresh token.
+        const tamperedCode = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          const relayTokens = yield* RelayTokens.RelayTokens;
+          const now = yield* DateTime.now;
+          const iat = Math.floor(now.epochMilliseconds / 1_000);
+          const jti = "tampered-jti-1";
+          const encGh = yield* sessions.sealSecret("ghu_tampered_raw", `code:${jti}:t3-cli`);
           return yield* relayTokens.issueOAuthCodeToken({
             userId: "github:42",
             githubLogin: "robert-crandall",
             encryptedGithubAccessToken: encGh,
+            encryptedGithubRefreshToken: "v1.invalid.ciphertext",
             clientId: "t3-cli",
             redirectUri,
             codeChallenge: pkceChallenge(verifier),
@@ -1479,8 +1555,7 @@ describe("GitHubOAuth", () => {
             expiresAtEpochSeconds: iat + 60,
           });
         }).pipe(Effect.provide(layerAuth));
-
-        const legacyExchangeRes = yield* httpEffect.pipe(
+        const tamperedRes = yield* httpEffect.pipe(
           Effect.provideService(
             HttpServerRequest.HttpServerRequest,
             HttpServerRequest.fromWeb(
@@ -1490,7 +1565,7 @@ describe("GitHubOAuth", () => {
                 body: new URLSearchParams({
                   grant_type: "authorization_code",
                   client_id: "t3-cli",
-                  code: legacyCode,
+                  code: tamperedCode,
                   redirect_uri: redirectUri,
                   code_verifier: verifier,
                 }),
@@ -1498,7 +1573,7 @@ describe("GitHubOAuth", () => {
             ),
           ),
         );
-        expect(legacyExchangeRes.status).toBe(200);
+        expect(tamperedRes.status).toBe(400);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
@@ -1641,8 +1716,22 @@ describe("GitHubOAuth", () => {
           throw new Error("expected Created");
         }
 
+        const waitUntilPromises: Array<{ promise: Promise<unknown>; settled: boolean }> = [];
+        const mockWorkerExecCtx = Cloudflare.fromExecutionContext({
+          waitUntil: (promise: Promise<unknown>) => {
+            const entry = { promise, settled: false };
+            void promise.finally(() => {
+              entry.settled = true;
+            });
+            waitUntilPromises.push(entry);
+          },
+          passThroughOnException: () => {},
+          props: {},
+        } as unknown as Parameters<typeof Cloudflare.fromExecutionContext>[0]);
+
         const postRefresh = (refreshToken: string) =>
           httpEffect.pipe(
+            Effect.provideService(Cloudflare.WorkerExecutionContext, mockWorkerExecCtx),
             Effect.provideService(
               HttpServerRequest.HttpServerRequest,
               HttpServerRequest.fromWeb(
@@ -1685,7 +1774,9 @@ describe("GitHubOAuth", () => {
         const [rowAfterOverrun] = yield* loadSessionRow();
         expect(rowAfterOverrun?.githubRefreshLeaseUntil).toBeNull();
 
-        const advanceToNextAttempt = (delay: "150 millis" | "350 millis") =>
+        const advanceToNextAttempt = (
+          delay: "150 millis" | "350 millis" | "1 seconds" | "2 seconds",
+        ) =>
           Effect.gen(function* () {
             yield* Queue.take(completeAttemptDone);
             // Drain the TestClock tracking scheduler so the retry fiber reaches Effect.sleep(delay).
@@ -1718,17 +1809,24 @@ describe("GitHubOAuth", () => {
         expect(refreshPostCount).toBe(1);
         const reuseBody = yield* readRefreshToken(reuseRes);
 
-        // 3. Outer interruption mid-refresh does not discard rotated tokens before persistence.
+        // 3. Outer interruption mid-refresh pins work to WorkerExecutionContext.waitUntil
+        // and persists rotated tokens before settling the waitUntil promise.
         refreshVersion += 1; // expire ghu_fault_2 so next call hits 401 -> refresh to ghu_fault_4
+        waitUntilPromises.length = 0;
         pauseRefreshStarted = yield* Deferred.make<void>();
         releasePausedRefresh = yield* Deferred.make<void>();
         const interruptedFiber = yield* Effect.forkChild(postRefresh(reuseBody.refresh_token));
         yield* Deferred.await(pauseRefreshStarted);
+        expect(waitUntilPromises).toHaveLength(1);
+        expect(waitUntilPromises[0]?.settled).toBe(false);
 
         const interruptWaiter = yield* Effect.forkChild(Fiber.interrupt(interruptedFiber));
         yield* Effect.yieldNow;
+        expect(waitUntilPromises[0]?.settled).toBe(false);
         yield* Deferred.succeed(releasePausedRefresh, undefined);
         yield* Fiber.join(interruptWaiter);
+        yield* Effect.promise(() => waitUntilPromises[0]!.promise);
+        expect(waitUntilPromises[0]?.settled).toBe(true);
         const interruptedExit = yield* Fiber.await(interruptedFiber);
         expect(Exit.isFailure(interruptedExit) && Cause.hasInterrupts(interruptedExit.cause)).toBe(
           true,
@@ -1783,7 +1881,7 @@ describe("GitHubOAuth", () => {
         expect(hungDbRes.status).toBe(200);
         const hungDbBody = yield* readRefreshToken(hungDbRes);
 
-        // 6. Exhausting all persistence retries returns 503.
+        // 6. Exhausting all 5 persistence attempts (150ms, 350ms, 1s, 2s) returns 503.
         refreshVersion += 1; // expire latest token
         failUpdateMode = "fail-all-after-claim";
         updateCount = 0;
@@ -1794,12 +1892,14 @@ describe("GitHubOAuth", () => {
         yield* Queue.take(completeAttemptStarted);
         yield* advanceToNextAttempt("150 millis");
         yield* advanceToNextAttempt("350 millis");
+        yield* advanceToNextAttempt("1 seconds");
+        yield* advanceToNextAttempt("2 seconds");
         yield* Queue.take(completeAttemptDone);
         const exhaustedRes = yield* Fiber.join(exhaustedFiber);
         trackCompleteAttempts = false;
         failUpdateMode = "none";
         expect(exhaustedRes.status).toBe(503);
-        expect(injectedFailures).toBe(3);
+        expect(injectedFailures).toBe(5);
 
         // 7. Persistence failure on Rejected returns 503 (not invalid_grant) without revoking.
         yield* TestClock.adjust(`${OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000} millis`);

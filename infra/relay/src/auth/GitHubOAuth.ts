@@ -3,6 +3,7 @@ import { normalizeRelayIssuer } from "@t3tools/shared/relayJwt";
 import * as Digest from "effect/crypto/Digest";
 import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -44,16 +45,19 @@ const GITHUB_SCOPES = "read:org user:email";
 const GITHUB_REQUEST_TIMEOUT = Duration.seconds(7);
 const GITHUB_REFRESH_REQUEST_TIMEOUT = Duration.seconds(4);
 // Once HTTP 200 arrives from GitHub (single-use refresh token already consumed), give body
-// decoding its own short timeout so a slow response at 3.99s is never aborted mid-parse.
-const GITHUB_REFRESH_DECODE_TIMEOUT = Duration.seconds(1);
+// decoding its own timeout so a slow response at 3.99s is never aborted mid-parse.
+const GITHUB_REFRESH_DECODE_TIMEOUT = Duration.seconds(2);
 // Keep the uninterruptible refresh+persist critical section strictly inside
-// OAuthSessions.GITHUB_REFRESH_LEASE_MS (30s), accounting for @effect/sql-pg's 5s query-cancel
-// drain per timed-out attempt (4s HTTP + 1s decode + 3*(2s + 5s) + 0.5s = 26.5s < 30s).
+// OAuthSessions.GITHUB_REFRESH_LEASE_MS (30s) while surviving brief DB connection blips.
 const GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT = Duration.seconds(2);
-const GITHUB_REFRESH_PERSIST_RETRY_DELAYS = [Duration.millis(150), Duration.millis(350)] as const;
+const GITHUB_REFRESH_PERSIST_RETRY_DELAYS = [
+  Duration.millis(150),
+  Duration.millis(350),
+  Duration.seconds(1),
+  Duration.seconds(2),
+] as const;
 const GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS = 7_500;
-// Do not burn a single-use GitHub refresh token unless >=6s remain in Api.ts's 9s request
-// deadline (and >=7s before the 10s mobile client timeout) for normal refresh+persist+recheck.
+// Do not burn a single-use GitHub refresh token unless >=6s remain in Api.ts's 9s deadline.
 const GITHUB_REFRESH_MAX_ELAPSED_BEFORE_CLAIM_MS = 3_000;
 const MAX_OAUTH_FORM_BODY_BYTES = 16_384;
 const GITHUB_USER_AGENT = "t3code-relay";
@@ -245,39 +249,6 @@ function githubOAuthUrls(config: RelayConfiguration.GitHubOAuthSettings) {
     oauthBaseUrl: (config.oauthBaseUrl ?? DEFAULT_GITHUB_OAUTH_BASE_URL).replace(/\/+$/, ""),
     apiBaseUrl: (config.apiBaseUrl ?? DEFAULT_GITHUB_API_BASE_URL).replace(/\/+$/, ""),
   };
-}
-
-function encodeAuthCodeGitHubTokens(input: {
-  readonly accessToken: string;
-  readonly refreshToken: string | null;
-}): string {
-  if (!input.refreshToken) {
-    return input.accessToken;
-  }
-  return JSON.stringify({ a: input.accessToken, r: input.refreshToken });
-}
-
-const AuthCodeGitHubTokens = Schema.Struct({
-  a: Schema.NonEmptyString,
-  r: Schema.optional(Schema.String),
-});
-
-const decodeAuthCodeGitHubTokensJson = Schema.decodeUnknownOption(
-  Schema.fromJsonString(AuthCodeGitHubTokens),
-);
-
-function decodeAuthCodeGitHubTokens(
-  plaintext: string,
-): Option.Option<{ readonly accessToken: string; readonly refreshToken: string | null }> {
-  if (!plaintext.startsWith("{")) {
-    return plaintext.length > 0
-      ? Option.some({ accessToken: plaintext, refreshToken: null })
-      : Option.none();
-  }
-  return Option.map(decodeAuthCodeGitHubTokensJson(plaintext), ({ a, r }) => ({
-    accessToken: a,
-    refreshToken: r && r.length > 0 ? r : null,
-  }));
 }
 
 class GitHubOrgMembershipDenied extends Schema.TaggedError<GitHubOrgMembershipDenied>()(
@@ -766,18 +737,22 @@ const handleGitHubCallback = Effect.gen(function* () {
   const expiresAtEpochSeconds = issuedAtEpochSeconds + RelayTokens.RELAY_OAUTH_CODE_TTL_SECONDS;
   const jti = yield* random.uuidV4();
   const encryptedGithubAccessToken = yield* sessions.sealSecret(
-    encodeAuthCodeGitHubTokens({
-      accessToken: githubAccessToken,
-      refreshToken: githubRefreshToken,
-    }),
+    githubAccessToken,
     `code:${jti}:${stateClaims.client_id}`,
   );
+  const encryptedGithubRefreshToken = githubRefreshToken
+    ? yield* sessions.sealSecret(
+        githubRefreshToken,
+        `code:${jti}:${stateClaims.client_id}:github-refresh`,
+      )
+    : undefined;
   const oauthCode = yield* relayTokens
     .issueOAuthCodeToken({
       userId: identity.userId,
       githubLogin: identity.githubLogin,
       ...(identity.email ? { email: identity.email } : {}),
       encryptedGithubAccessToken,
+      ...(encryptedGithubRefreshToken ? { encryptedGithubRefreshToken } : {}),
       clientId: stateClaims.client_id,
       redirectUri: stateClaims.redirect_uri,
       codeChallenge: stateClaims.code_challenge,
@@ -912,13 +887,23 @@ const handleToken = Effect.gen(function* () {
       return oauthErrorResponse("invalid_grant", "PKCE code_verifier verification failed.");
     }
 
-    const openedGithubTokens = yield* sessions.openSecret(
+    const githubAccessToken = yield* sessions.openSecret(
       codeClaims.enc_gh,
       `code:${codeClaims.jti}:${clientId}`,
     );
-    const githubTokens = Option.flatMap(openedGithubTokens, decodeAuthCodeGitHubTokens);
-    if (Option.isNone(githubTokens)) {
+    if (Option.isNone(githubAccessToken) || githubAccessToken.value.length === 0) {
       return oauthErrorResponse("invalid_grant", "Authorization code is invalid or expired.");
+    }
+    let githubRefreshToken: string | null = null;
+    if (codeClaims.enc_ghr !== undefined) {
+      const openedRefreshToken = yield* sessions.openSecret(
+        codeClaims.enc_ghr,
+        `code:${codeClaims.jti}:${clientId}:github-refresh`,
+      );
+      if (Option.isNone(openedRefreshToken) || openedRefreshToken.value.length === 0) {
+        return oauthErrorResponse("invalid_grant", "Authorization code is invalid or expired.");
+      }
+      githubRefreshToken = openedRefreshToken.value;
     }
 
     const created = yield* sessions
@@ -927,8 +912,8 @@ const handleToken = Effect.gen(function* () {
         githubLogin: codeClaims.preferred_username,
         ...(codeClaims.email ? { email: codeClaims.email } : {}),
         clientId,
-        githubAccessToken: githubTokens.value.accessToken,
-        githubRefreshToken: githubTokens.value.refreshToken,
+        githubAccessToken: githubAccessToken.value,
+        githubRefreshToken,
         authCodeJti: codeClaims.jti,
         authCodeExpiresAt: DateTime.formatIso(DateTime.makeUnsafe(codeClaims.exp * 1_000)),
       })
@@ -1237,115 +1222,143 @@ const handleToken = Effect.gen(function* () {
             );
           }
 
-          // Run refresh POST + DB completion uninterruptibly so Api.ts's 9s request deadline cannot
-          // discard rotated tokens mid-flight (Cloudflare isolate kills on disconnect cannot be
-          // shielded without waitUntil). Internal timeouts + lease-margin checks stay inside the
-          // 30s lease even with @effect/sql-pg's 5s query-cancel drain.
+          // Run refresh POST + DB completion uninterruptibly and pin it to Cloudflare's
+          // ExecutionContext.waitUntil so neither Api.ts's 9s deadline nor a client disconnect
+          // cancels persistence after GitHub consumes the single-use refresh token.
           const claimedLeaseUntilMs = Date.parse(claim.claimedLeaseUntil);
-          const exchangeAndPersist = yield* Effect.gen(function* () {
-            const refreshed = yield* refreshGitHubAccessToken({
-              githubRefreshToken: claim.githubRefreshToken,
-              githubOAuth: config.githubOAuth,
-            });
-            if (refreshed._tag === "Rejected") {
-              const completed = yield* sessions
-                .completeGitHubRefresh({
-                  _tag: "Rejected",
-                  sessionId,
-                  expectedEncryptedGithubRefreshToken: claim.expectedEncryptedGithubRefreshToken,
-                  claimedLeaseUntil: claim.claimedLeaseUntil,
-                })
-                .pipe(Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT), Effect.result);
-              if (
-                completed._tag === "Failure" ||
-                Option.isNone(completed.success) ||
-                completed.success.value._tag === "Superseded"
-              ) {
-                return {
-                  _tag: "Response" as const,
-                  response: oauthErrorResponse(
-                    "temporarily_unavailable",
-                    "Could not complete GitHub authorization refresh.",
-                    503,
-                  ),
-                };
-              }
-              return {
-                _tag: "Response" as const,
-                response: oauthErrorResponse(
-                  "invalid_grant",
-                  "GitHub authorization expired; sign in again.",
-                ),
-              };
-            }
-            if (refreshed._tag === "TransientFailure") {
-              yield* sessions
-                .completeGitHubRefresh({
-                  _tag: "TransientFailure",
-                  sessionId,
-                  claimedLeaseUntil: claim.claimedLeaseUntil,
-                })
-                .pipe(Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT), Effect.result);
-              return {
-                _tag: "Response" as const,
-                response: oauthErrorResponse(
-                  "temporarily_unavailable",
-                  "Could not refresh GitHub authorization.",
-                  503,
-                ),
-              };
-            }
+          const execCtx = yield* Cloudflare.WorkerExecutionContext;
+          let releaseWaitUntil: (() => void) | undefined;
+          const exchangeAndPersist = yield* Effect.uninterruptible(
+            Effect.ensuring(
+              Effect.gen(function* () {
+                if (execCtx !== Cloudflare.deferredExecutionContext) {
+                  yield* Effect.sync(() => {
+                    execCtx.raw.waitUntil(
+                      new Promise<void>((resolve) => {
+                        releaseWaitUntil = resolve;
+                      }),
+                    );
+                  });
+                }
+                const refreshed = yield* refreshGitHubAccessToken({
+                  githubRefreshToken: claim.githubRefreshToken,
+                  githubOAuth: config.githubOAuth,
+                });
+                if (refreshed._tag === "Rejected") {
+                  const completed = yield* sessions
+                    .completeGitHubRefresh({
+                      _tag: "Rejected",
+                      sessionId,
+                      expectedEncryptedGithubRefreshToken:
+                        claim.expectedEncryptedGithubRefreshToken,
+                      claimedLeaseUntil: claim.claimedLeaseUntil,
+                    })
+                    .pipe(
+                      Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT),
+                      Effect.result,
+                    );
+                  if (
+                    completed._tag === "Failure" ||
+                    Option.isNone(completed.success) ||
+                    completed.success.value._tag === "Superseded"
+                  ) {
+                    return {
+                      _tag: "Response" as const,
+                      response: oauthErrorResponse(
+                        "temporarily_unavailable",
+                        "Could not complete GitHub authorization refresh.",
+                        503,
+                      ),
+                    };
+                  }
+                  return {
+                    _tag: "Response" as const,
+                    response: oauthErrorResponse(
+                      "invalid_grant",
+                      "GitHub authorization expired; sign in again.",
+                    ),
+                  };
+                }
+                if (refreshed._tag === "TransientFailure") {
+                  yield* sessions
+                    .completeGitHubRefresh({
+                      _tag: "TransientFailure",
+                      sessionId,
+                      claimedLeaseUntil: claim.claimedLeaseUntil,
+                    })
+                    .pipe(
+                      Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT),
+                      Effect.result,
+                    );
+                  return {
+                    _tag: "Response" as const,
+                    response: oauthErrorResponse(
+                      "temporarily_unavailable",
+                      "Could not refresh GitHub authorization.",
+                      503,
+                    ),
+                  };
+                }
 
-            // Persist rotated GitHub tokens before re-verifying org membership so a subsequent
-            // org-check timeout or failure never discards a consumed single-use refresh token.
-            let persisted: "Applied" | "Superseded" | "Failed" = "Failed";
-            for (
-              let attempt = 0;
-              attempt <= GITHUB_REFRESH_PERSIST_RETRY_DELAYS.length;
-              attempt++
-            ) {
-              const attemptResult = yield* sessions
-                .completeGitHubRefresh({
-                  _tag: "Succeeded",
-                  sessionId,
-                  clientId,
-                  expectedEncryptedGithubRefreshToken: claim.expectedEncryptedGithubRefreshToken,
+                // Persist rotated GitHub tokens before re-verifying org membership so a subsequent
+                // org-check timeout or failure never discards a consumed single-use refresh token.
+                let persisted: "Applied" | "Superseded" | "Failed" = "Failed";
+                for (
+                  let attempt = 0;
+                  attempt <= GITHUB_REFRESH_PERSIST_RETRY_DELAYS.length;
+                  attempt++
+                ) {
+                  const attemptResult = yield* sessions
+                    .completeGitHubRefresh({
+                      _tag: "Succeeded",
+                      sessionId,
+                      clientId,
+                      expectedEncryptedGithubRefreshToken:
+                        claim.expectedEncryptedGithubRefreshToken,
+                      githubAccessToken: refreshed.githubAccessToken,
+                      githubRefreshToken: refreshed.githubRefreshToken,
+                    })
+                    .pipe(
+                      Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT),
+                      Effect.result,
+                    );
+                  if (attemptResult._tag === "Success" && Option.isSome(attemptResult.success)) {
+                    persisted = attemptResult.success.value._tag;
+                    break;
+                  }
+                  const retryDelay = GITHUB_REFRESH_PERSIST_RETRY_DELAYS[attempt];
+                  if (retryDelay === undefined) {
+                    break;
+                  }
+                  const nowMs = (yield* DateTime.now).epochMilliseconds;
+                  if (
+                    Number.isFinite(claimedLeaseUntilMs) &&
+                    nowMs + GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS >= claimedLeaseUntilMs
+                  ) {
+                    break;
+                  }
+                  yield* Effect.sleep(retryDelay);
+                }
+                if (persisted !== "Applied") {
+                  return {
+                    _tag: "Response" as const,
+                    response: oauthErrorResponse(
+                      "temporarily_unavailable",
+                      "Could not persist refreshed GitHub authorization.",
+                      503,
+                    ),
+                  };
+                }
+                return {
+                  _tag: "Persisted" as const,
                   githubAccessToken: refreshed.githubAccessToken,
-                  githubRefreshToken: refreshed.githubRefreshToken,
-                })
-                .pipe(Effect.timeoutOption(GITHUB_REFRESH_PERSIST_ATTEMPT_TIMEOUT), Effect.result);
-              if (attemptResult._tag === "Success" && Option.isSome(attemptResult.success)) {
-                persisted = attemptResult.success.value._tag;
-                break;
-              }
-              const retryDelay = GITHUB_REFRESH_PERSIST_RETRY_DELAYS[attempt];
-              if (retryDelay === undefined) {
-                break;
-              }
-              const nowMs = (yield* DateTime.now).epochMilliseconds;
-              if (
-                Number.isFinite(claimedLeaseUntilMs) &&
-                nowMs + GITHUB_REFRESH_PERSIST_MIN_LEASE_MARGIN_MS >= claimedLeaseUntilMs
-              ) {
-                break;
-              }
-              yield* Effect.sleep(retryDelay);
-            }
-            if (persisted !== "Applied") {
-              return {
-                _tag: "Response" as const,
-                response: oauthErrorResponse(
-                  "temporarily_unavailable",
-                  "Could not persist refreshed GitHub authorization.",
-                  503,
-                ),
-              };
-            }
-            return {
-              _tag: "Persisted" as const,
-              githubAccessToken: refreshed.githubAccessToken,
-            };
-          }).pipe(Effect.uninterruptible);
+                };
+              }),
+              Effect.sync(() => {
+                releaseWaitUntil?.();
+              }),
+            ),
+          );
 
           if (exchangeAndPersist._tag === "Response") {
             return exchangeAndPersist.response;
