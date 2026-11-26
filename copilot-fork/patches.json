@@ -119,6 +119,22 @@
       "notes": "Maintainer-verified effect-acp normalization preserving env_var authMethods on ACP v1 initialize responses."
     },
     {
+      "pr": 43025,
+      "url": "https://github.com/pingdotgg/t3code/pull/43025",
+      "title": "fix(acp-registry): model discovery keeps options only the discovered model reports",
+      "status": "integrated",
+      "reviewedHeadSha": "c5fdd8d9d790410d6807860e9b7855932708a55a",
+      "notes": "Maintainer fix (#43013) preserving uncategorized model-specific configOptions such as GitHub Copilot contextTier (default/long_context) during pre-prompt model option discovery."
+    },
+    {
+      "pr": 43347,
+      "url": "https://github.com/pingdotgg/t3code/pull/43347",
+      "title": "fix(acp): permission requests after Stop are answered cancelled, not failed",
+      "status": "integrated",
+      "reviewedHeadSha": "c14b9d666fb184733fda9dcc6aaa42ef48b928f0",
+      "notes": "Maintainer fix (#43336) answering ACP session/request_permission RPCs that race session/cancel after turn settlement with { outcome: \"cancelled\" } instead of JSON-RPC -32603."
+    },
+    {
       "pr": 33683,
       "url": "https://github.com/pingdotgg/t3code/pull/33683",
       "title": "fix(acp-registry): ACP v2 agent prompt handling + state updates",
@@ -187,8 +203,8 @@
       "url": "https://github.com/pingdotgg/t3code/pull/39362",
       "title": "fix(antigravity): defer optional T3 MCP tools via tool_call proxy",
       "status": "skipped",
-      "reviewedHeadSha": "bcdf758006e9c65ffee333c33da92ff96e9e78a3",
-      "skipReason": "Antigravity-only (+816/-69) MCP proxy change; Copilot optional T3 tools are already covered by #37799."
+      "reviewedHeadSha": "32f030366f0cb2fcdec5459dd88a740fad1f8c7a",
+      "skipReason": "Antigravity-only (+932/-87, takeover:blocked) MCP proxy change with open review findings on proxy exposure mode; Copilot optional T3 tools are already covered by #37799."
     },
     {
       "pr": 39606,
@@ -445,6 +461,30 @@
       "status": "skipped",
       "reviewedHeadSha": "4214ad4f37ed5fcffd5e7fdea24d6e2365539382",
       "skipReason": "Antigravity held-open multi-wake / replyEndsWithUsageUpdate folding change (+532/-53); Copilot ACP uses separate continuation turns rather than held-open replyEndsWithUsageUpdate wakes."
+    },
+    {
+      "pr": 43400,
+      "url": "https://github.com/pingdotgg/t3code/pull/43400",
+      "title": "fix(acp): isolate session/load replays and scope tool item IDs per turn",
+      "status": "skipped",
+      "reviewedHeadSha": "66ca716622d60b3199616ab028254c44da533f92",
+      "skipReason": "Large invasive refactor (+1477/-124, takeover:blocked) across AcpSessionRuntime and AcpAdapterV2 with multiple unresolved Major/P2 review defects on replay quarantine, detached commands, and session/cancel."
+    },
+    {
+      "pr": 43075,
+      "url": "https://github.com/pingdotgg/t3code/pull/43075",
+      "title": "fix(server): Antigravity helper processes run in an auth-only profile",
+      "status": "skipped",
+      "reviewedHeadSha": "0dca3815ff467504d2b035750035b9b42b28f8f9",
+      "skipReason": "Antigravity-only helper profile isolation (+373/-41) unrelated to Copilot ACP (Copilot text generation already uses isolated COPILOT_HOME via #32976)."
+    },
+    {
+      "pr": 43315,
+      "url": "https://github.com/pingdotgg/t3code/pull/43315",
+      "title": "fix(provider-acp): Stop during outcome-failure resume settles instead of timing out",
+      "status": "skipped",
+      "reviewedHeadSha": "5dc12331d0c3d481a00f22f5b31ed97e684b8f53",
+      "skipReason": "Unvouched (+475/-59) watchPromptOutcome resumeWith state-machine change with 3 unresolved Major review findings on terminal settlement and unacknowledged steers."
     }
   ]
 }
