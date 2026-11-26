@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
@@ -10,8 +11,10 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as GitHubOAuth from "./GitHubOAuth.ts";
+import * as OAuthSessions from "./OAuthSessions.ts";
 import * as RelayTokens from "./RelayTokens.ts";
 import { setupPgliteOAuthTest } from "./testSupport.ts";
 
@@ -22,7 +25,12 @@ function pkceChallenge(verifier: string): string {
 function makeTestApp(options: {
   allowedOrgs?: ReadonlyArray<string>;
   failUpdate?: () => boolean;
-  onGitHubRequest: (url: string, method: string, body: string) => Response;
+  onGitHubRequest: (
+    url: string,
+    method: string,
+    body: string,
+    headers: Readonly<Record<string, string>>,
+  ) => Response | Promise<Response>;
 }) {
   return Effect.gen(function* () {
     const { layerAuth } = yield* setupPgliteOAuthTest({
@@ -31,10 +39,15 @@ function makeTestApp(options: {
     });
 
     const mockHttpClient = HttpClient.make((request) =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
         const bodyText =
           request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
-        const response = options.onGitHubRequest(request.url, request.method, bodyText);
+        const response = await options.onGitHubRequest(
+          request.url,
+          request.method,
+          bodyText,
+          request.headers,
+        );
         return HttpClientResponse.fromWeb(request, response);
       }),
     );
@@ -834,6 +847,650 @@ describe("GitHubOAuth", () => {
           return yield* relayTokens.verifyClientAccessToken({ token: tokens.access_token });
         }).pipe(Effect.provide(layerAuth));
         expect(claims?.client_id).toBe("t3-mobile");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live(
+    "captures GitHub refresh tokens in PKCE login, transparently refreshes on 401 across rotations, and revokes on post-refresh org denial",
+    () =>
+      Effect.gen(function* () {
+        let validAccessToken = "ghu_1";
+        let expectedRefreshToken = "ghr_1";
+        let nextPair = { access_token: "ghu_2", refresh_token: "ghr_2" };
+        let denyOrgForToken: string | null = null;
+        const refreshCalls: Array<URLSearchParams> = [];
+
+        const { app } = yield* makeTestApp({
+          onGitHubRequest: (url, _method, body, headers) => {
+            if (url.endsWith("/login/oauth/access_token")) {
+              const params = new URLSearchParams(body);
+              if (params.get("grant_type") === "refresh_token") {
+                refreshCalls.push(params);
+                if (params.get("refresh_token") !== expectedRefreshToken) {
+                  return Response.json({ error: "bad_refresh_token" });
+                }
+                validAccessToken = nextPair.access_token;
+                expectedRefreshToken = nextPair.refresh_token;
+                return Response.json({ ...nextPair, token_type: "bearer" });
+              }
+              return Response.json({
+                access_token: "ghu_1",
+                refresh_token: "ghr_1",
+                token_type: "bearer",
+              });
+            }
+            if (url.endsWith("/user")) {
+              return Response.json({
+                id: 42,
+                login: "robert-crandall",
+                email: "rob@crandalls.cloud",
+              });
+            }
+            if (url.includes("/user/memberships/orgs/")) {
+              const auth = headers.authorization ?? "";
+              if (denyOrgForToken && auth === `Bearer ${denyOrgForToken}`) {
+                return new Response("Not Found", { status: 404 });
+              }
+              if (auth !== `Bearer ${validAccessToken}`) {
+                return new Response("Bad credentials", { status: 401 });
+              }
+              return Response.json({ state: "active" });
+            }
+            return new Response(`Unexpected URL: ${url}`, { status: 500 });
+          },
+        });
+
+        const verifier = "pkce-refresh-verifier-0123456789abcdefghijklmnopqrstuvwxyz";
+        const redirectUri = "t3code-private://oauth/callback";
+        const authRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request(
+              `https://relay.crandalls.cloud/v1/auth/authorize?client_id=t3-mobile&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&state=s1&code_challenge=${pkceChallenge(verifier)}&code_challenge_method=S256`,
+            ),
+          ),
+        );
+        const state = new URL(authRes.headers.get("location")!).searchParams.get("state")!;
+        const cookie = authRes.headers.get("set-cookie")!.split(";")[0]!;
+        const cbRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request(
+              `https://relay.crandalls.cloud/v1/auth/github/callback?code=gh_code&state=${encodeURIComponent(state)}`,
+              { headers: { cookie } },
+            ),
+          ),
+        );
+        const relayCode = new URL(cbRes.headers.get("location")!).searchParams.get("code")!;
+
+        const loginRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "authorization_code",
+                client_id: "t3-mobile",
+                code: relayCode,
+                redirect_uri: redirectUri,
+                code_verifier: verifier,
+              }),
+            }),
+          ),
+        );
+        expect(loginRes.status).toBe(200);
+        const loginBody = (yield* Effect.promise(() => loginRes.json())) as {
+          refresh_token: string;
+        };
+
+        // Expire ghu_1 -> reactive refresh exchanges ghr_1 for (ghu_2, ghr_2) and succeeds.
+        validAccessToken = "expired";
+        const refresh1 = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: "t3-mobile",
+                refresh_token: loginBody.refresh_token,
+              }),
+            }),
+          ),
+        );
+        expect(refresh1.status).toBe(200);
+        expect(refreshCalls).toHaveLength(1);
+        expect(refreshCalls[0]?.get("refresh_token")).toBe("ghr_1");
+        expect(refreshCalls[0]?.get("client_id")).toBe("gh-client-123");
+        expect(refreshCalls[0]?.get("client_secret")).toBe("gh-secret-456");
+        const r1Body = (yield* Effect.promise(() => refresh1.json())) as {
+          refresh_token: string;
+        };
+
+        // Expire ghu_2 -> uses newly rotated ghr_2 to mint (ghu_3, ghr_3).
+        validAccessToken = "expired";
+        nextPair = { access_token: "ghu_3", refresh_token: "ghr_3" };
+        const refresh2 = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: "t3-mobile",
+                refresh_token: r1Body.refresh_token,
+              }),
+            }),
+          ),
+        );
+        expect(refresh2.status).toBe(200);
+        expect(refreshCalls).toHaveLength(2);
+        expect(refreshCalls[1]?.get("refresh_token")).toBe("ghr_2");
+        const r2Body = (yield* Effect.promise(() => refresh2.json())) as {
+          refresh_token: string;
+        };
+
+        // Expire ghu_3, refresh yields ghu_4, but user was removed from org (404) -> revokes.
+        validAccessToken = "expired";
+        nextPair = { access_token: "ghu_4", refresh_token: "ghr_4" };
+        denyOrgForToken = "ghu_4";
+        const deniedAfterRefresh = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: "t3-mobile",
+                refresh_token: r2Body.refresh_token,
+              }),
+            }),
+          ),
+        );
+        expect(deniedAfterRefresh.status).toBe(400);
+        expect(yield* Effect.promise(() => deniedAfterRefresh.json())).toMatchObject({
+          error: "invalid_grant",
+        });
+
+        // Session stays revoked even if org membership is restored.
+        denyOrgForToken = null;
+        const postRevoke = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: "t3-mobile",
+                refresh_token: r2Body.refresh_token,
+              }),
+            }),
+          ),
+        );
+        expect(postRevoke.status).toBe(400);
+        expect(yield* Effect.promise(() => postRevoke.json())).toMatchObject({
+          error: "invalid_grant",
+        });
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live(
+    "handles device-flow refresh tokens: treats non-bad_refresh_token 200 errors as 503, preserves persisted tokens across post-refresh 500, revokes on bad_refresh_token, and revokes legacy sessions without a refresh token",
+    () =>
+      Effect.gen(function* () {
+        let deviceLoginReturnsRefresh = true;
+        let activeAccessToken = "ghu_dev_1";
+        let refreshResponse: Record<string, unknown> = {
+          error: "incorrect_client_credentials",
+        };
+        let postRefreshOrg500 = false;
+        let refreshPostCount = 0;
+
+        const { app } = yield* makeTestApp({
+          onGitHubRequest: (url, _method, body, headers) => {
+            if (url.endsWith("/login/device/code")) {
+              return Response.json({
+                device_code: "gh_dev_1",
+                user_code: "ABCD-1234",
+                verification_uri: "https://github.com/login/device",
+                expires_in: 900,
+                interval: 5,
+              });
+            }
+            if (url.endsWith("/login/oauth/access_token")) {
+              const params = new URLSearchParams(body);
+              if (params.get("grant_type") === "refresh_token") {
+                refreshPostCount += 1;
+                return Response.json(refreshResponse);
+              }
+              return Response.json(
+                deviceLoginReturnsRefresh
+                  ? { access_token: "ghu_dev_1", refresh_token: "ghr_dev_1", token_type: "bearer" }
+                  : { access_token: "gho_legacy_1", token_type: "bearer" },
+              );
+            }
+            if (url.endsWith("/user")) {
+              return Response.json({ id: 42, login: "robert-crandall", email: null });
+            }
+            if (url.includes("/user/memberships/orgs/")) {
+              const auth = headers.authorization ?? "";
+              if (auth === `Bearer ${activeAccessToken}`) {
+                if (postRefreshOrg500) {
+                  return new Response("Internal Server Error", { status: 500 });
+                }
+                return Response.json({ state: "active" });
+              }
+              return new Response("Unauthorized", { status: 401 });
+            }
+            return new Response(`Unexpected URL: ${url}`, { status: 500 });
+          },
+        });
+
+        const startDeviceSession = () =>
+          Effect.gen(function* () {
+            const devRes = yield* Effect.promise(() =>
+              app.handler(
+                new Request("https://relay.crandalls.cloud/v1/auth/device", {
+                  method: "POST",
+                  headers: { "content-type": "application/x-www-form-urlencoded" },
+                  body: new URLSearchParams({ client_id: "t3-cli" }),
+                }),
+              ),
+            );
+            const { device_code: deviceCode } = (yield* Effect.promise(() => devRes.json())) as {
+              device_code: string;
+            };
+            const tokRes = yield* Effect.promise(() =>
+              app.handler(
+                new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                  method: "POST",
+                  headers: { "content-type": "application/x-www-form-urlencoded" },
+                  body: new URLSearchParams({
+                    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+                    client_id: "t3-cli",
+                    device_code: deviceCode,
+                  }),
+                }),
+              ),
+            );
+            expect(tokRes.status).toBe(200);
+            const body = (yield* Effect.promise(() => tokRes.json())) as {
+              refresh_token: string;
+            };
+            return body.refresh_token;
+          });
+
+        const refreshSession = (refreshToken: string) =>
+          Effect.promise(() =>
+            app.handler(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                  grant_type: "refresh_token",
+                  client_id: "t3-cli",
+                  refresh_token: refreshToken,
+                }),
+              }),
+            ),
+          );
+
+        const refreshToken = yield* startDeviceSession();
+
+        // 1. HTTP 200 { error: "incorrect_client_credentials" } -> 503, does NOT revoke, releases lease.
+        activeAccessToken = "expired";
+        refreshResponse = { error: "incorrect_client_credentials" };
+        const badClientCredsRes = yield* refreshSession(refreshToken);
+        expect(badClientCredsRes.status).toBe(503);
+        expect(yield* Effect.promise(() => badClientCredsRes.json())).toMatchObject({
+          error: "temporarily_unavailable",
+        });
+
+        // 2. Refresh succeeds with (ghu_dev_2, ghr_dev_2), then post-refresh org check hits 500.
+        // Relay returns 503 AND has already persisted (ghu_dev_2, ghr_dev_2).
+        refreshResponse = {
+          access_token: "ghu_dev_2",
+          refresh_token: "ghr_dev_2",
+          token_type: "bearer",
+        };
+        activeAccessToken = "ghu_dev_2";
+        postRefreshOrg500 = true;
+        const postRefresh500Res = yield* refreshSession(refreshToken);
+        expect(postRefresh500Res.status).toBe(503);
+        expect(refreshPostCount).toBe(2);
+
+        // 3. When org endpoint recovers, retry succeeds using persisted ghu_dev_2 with NO new refresh POST.
+        postRefreshOrg500 = false;
+        const recoveredRes = yield* refreshSession(refreshToken);
+        expect(recoveredRes.status).toBe(200);
+        expect(refreshPostCount).toBe(2);
+        const { refresh_token: rotatedRefreshToken } = (yield* Effect.promise(() =>
+          recoveredRes.json(),
+        )) as { refresh_token: string };
+
+        // 4. HTTP 200 { error: "bad_refresh_token" } revokes the session -> 400 invalid_grant.
+        activeAccessToken = "expired";
+        refreshResponse = { error: "bad_refresh_token" };
+        const badRefreshRes = yield* refreshSession(rotatedRefreshToken);
+        expect(badRefreshRes.status).toBe(400);
+        expect(yield* Effect.promise(() => badRefreshRes.json())).toMatchObject({
+          error: "invalid_grant",
+        });
+
+        // 5. Legacy session without a stored refresh token revokes immediately on 401 without calling refresh.
+        deviceLoginReturnsRefresh = false;
+        activeAccessToken = "gho_legacy_1";
+        const legacyRefreshToken = yield* startDeviceSession();
+        const countBeforeLegacy401 = refreshPostCount;
+        activeAccessToken = "expired";
+        const legacy401Res = yield* refreshSession(legacyRefreshToken);
+        expect(legacy401Res.status).toBe(400);
+        expect(yield* Effect.promise(() => legacy401Res.json())).toMatchObject({
+          error: "invalid_grant",
+        });
+        expect(refreshPostCount).toBe(countBeforeLegacy401);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live(
+    "serializes concurrent 401 refreshes via lease and serves grace-window and AlreadyRefreshed peers cleanly",
+    () =>
+      Effect.gen(function* () {
+        let activeAccessToken = "ghu_race_1";
+        let refreshPostCount = 0;
+        let resolveRefreshBarrier!: () => void;
+        let notifyRefreshStarted!: () => void;
+        const refreshStarted = new Promise<void>((resolve) => {
+          notifyRefreshStarted = resolve;
+        });
+        const refreshBarrier = new Promise<void>((resolve) => {
+          resolveRefreshBarrier = resolve;
+        });
+        let holdSecondOrg401 = false;
+        let releaseHeldOrg401!: () => void;
+        let notifyOrg401Held!: () => void;
+        const org401Held = new Promise<void>((resolve) => {
+          notifyOrg401Held = resolve;
+        });
+        const org401Gate = new Promise<void>((resolve) => {
+          releaseHeldOrg401 = resolve;
+        });
+
+        const { app } = yield* makeTestApp({
+          onGitHubRequest: async (url, _method, body, headers) => {
+            if (url.endsWith("/login/device/code")) {
+              return Response.json({
+                device_code: "gh_dev_race",
+                user_code: "RACE-1234",
+                verification_uri: "https://github.com/login/device",
+                expires_in: 900,
+                interval: 5,
+              });
+            }
+            if (url.endsWith("/login/oauth/access_token")) {
+              const params = new URLSearchParams(body);
+              if (params.get("grant_type") === "refresh_token") {
+                refreshPostCount += 1;
+                notifyRefreshStarted();
+                await refreshBarrier;
+                activeAccessToken = "ghu_race_2";
+                return Response.json({
+                  access_token: "ghu_race_2",
+                  refresh_token: "ghr_race_2",
+                  token_type: "bearer",
+                });
+              }
+              return Response.json({
+                access_token: "ghu_race_1",
+                refresh_token: "ghr_race_1",
+                token_type: "bearer",
+              });
+            }
+            if (url.endsWith("/user")) {
+              return Response.json({ id: 42, login: "robert-crandall", email: null });
+            }
+            if (url.includes("/user/memberships/orgs/")) {
+              if (headers.authorization === `Bearer ${activeAccessToken}`) {
+                return Response.json({ state: "active" });
+              }
+              if (holdSecondOrg401) {
+                holdSecondOrg401 = false;
+                notifyOrg401Held();
+                await org401Gate;
+              }
+              return new Response("Unauthorized", { status: 401 });
+            }
+            return new Response(`Unexpected URL: ${url}`, { status: 500 });
+          },
+        });
+
+        // Create session with (ghu_race_1, ghr_race_1).
+        const devRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/device", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ client_id: "t3-cli" }),
+            }),
+          ),
+        );
+        const { device_code: deviceCode } = (yield* Effect.promise(() => devRes.json())) as {
+          device_code: string;
+        };
+        const loginRes = yield* Effect.promise(() =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+                client_id: "t3-cli",
+                device_code: deviceCode,
+              }),
+            }),
+          ),
+        );
+        const { refresh_token: rt1 } = (yield* Effect.promise(() => loginRes.json())) as {
+          refresh_token: string;
+        };
+
+        const postRefresh = (token: string) =>
+          app.handler(
+            new Request("https://relay.crandalls.cloud/v1/auth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: "t3-cli",
+                refresh_token: token,
+              }),
+            }),
+          );
+
+        // Expire ghu_race_1 and start Worker A + Worker C (held on initial 401 to hit AlreadyRefreshed).
+        activeAccessToken = "expired";
+        const workerAPromise = postRefresh(rt1);
+        yield* Effect.promise(() => refreshStarted);
+
+        // Worker B arrives while Worker A holds the lease -> 503 InFlight, no second refresh POST.
+        const workerBRes = yield* Effect.promise(() => postRefresh(rt1));
+        expect(workerBRes.status).toBe(503);
+        expect(refreshPostCount).toBe(1);
+
+        // Worker C starts and pauses right before receiving its initial 401.
+        holdSecondOrg401 = true;
+        const workerCPromise = postRefresh(rt1);
+        yield* Effect.promise(() => org401Held);
+
+        // Let Worker A complete refresh -> rotates rt1 -> rt2.
+        resolveRefreshBarrier();
+        const workerARes = yield* Effect.promise(() => workerAPromise);
+        expect(workerARes.status).toBe(200);
+        const { refresh_token: rt2 } = (yield* Effect.promise(() => workerARes.json())) as {
+          refresh_token: string;
+        };
+
+        // Release Worker C -> hits AlreadyRefreshed(ghu_race_2), re-verifies org, returns grace-cached rt2.
+        releaseHeldOrg401();
+        const workerCRes = yield* Effect.promise(() => workerCPromise);
+        expect(workerCRes.status).toBe(200);
+        expect(yield* Effect.promise(() => workerCRes.json())).toMatchObject({
+          refresh_token: rt2,
+        });
+        expect(refreshPostCount).toBe(1);
+
+        // Worker B's grace-window retry with rt1 also succeeds with rt2 and no refresh POST.
+        const workerBRetryRes = yield* Effect.promise(() => postRefresh(rt1));
+        expect(workerBRetryRes.status).toBe(200);
+        expect(yield* Effect.promise(() => workerBRetryRes.json())).toMatchObject({
+          refresh_token: rt2,
+        });
+        expect(refreshPostCount).toBe(1);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect(
+    "skips refresh when initial org check consumes request budget and stays compatible with legacy raw enc_gh codes",
+    () =>
+      Effect.gen(function* () {
+        const { layerAuth } = yield* setupPgliteOAuthTest();
+        const startMs = Date.parse("2026-11-24T12:00:00.000Z");
+        yield* TestClock.setTime(startMs);
+
+        let slowInitial401 = true;
+        let refreshPostCount = 0;
+        const mockHttpClient = HttpClient.make((request) =>
+          Effect.gen(function* () {
+            if (request.url.endsWith("/login/oauth/access_token")) {
+              refreshPostCount += 1;
+              return HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  access_token: "ghu_budget_2",
+                  refresh_token: "ghr_budget_2",
+                  token_type: "bearer",
+                }),
+              );
+            }
+            if (request.url.includes("/user/memberships/orgs/")) {
+              if (request.headers.authorization === "Bearer ghu_budget_2") {
+                return HttpClientResponse.fromWeb(request, Response.json({ state: "active" }));
+              }
+              if (slowInitial401) {
+                yield* TestClock.adjust("4500 millis");
+              }
+              return HttpClientResponse.fromWeb(
+                request,
+                new Response("Unauthorized", { status: 401 }),
+              );
+            }
+            return HttpClientResponse.fromWeb(request, new Response("Not Found", { status: 404 }));
+          }),
+        );
+
+        const httpEffect = yield* HttpRouter.toHttpEffect(
+          GitHubOAuth.layerRoutes.pipe(
+            Layer.provide(layerAuth),
+            Layer.provide(Layer.succeed(HttpClient.HttpClient, mockHttpClient)),
+          ),
+        ).pipe(Effect.provide(HttpServer.layerServices));
+
+        // 1. Seed a session with an expiring access token + refresh token.
+        const created = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.create({
+            userId: "github:42",
+            githubLogin: "robert-crandall",
+            clientId: "t3-cli",
+            githubAccessToken: "ghu_budget_1",
+            githubRefreshToken: "ghr_budget_1",
+          });
+        }).pipe(Effect.provide(layerAuth));
+        if (created._tag !== "Created") {
+          throw new Error("expected Created");
+        }
+
+        // Slow initial 401 (>4s elapsed) returns 503 without claiming lease or calling GitHub refresh.
+        const slowRes = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                  grant_type: "refresh_token",
+                  client_id: "t3-cli",
+                  refresh_token: created.refreshToken,
+                }),
+              }),
+            ),
+          ),
+        );
+        expect(slowRes.status).toBe(503);
+        expect(refreshPostCount).toBe(0);
+
+        // Next fast 401 proceeds to refresh and succeeds.
+        slowInitial401 = false;
+        const fastRes = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                  grant_type: "refresh_token",
+                  client_id: "t3-cli",
+                  refresh_token: created.refreshToken,
+                }),
+              }),
+            ),
+          ),
+        );
+        expect(fastRes.status).toBe(200);
+        expect(refreshPostCount).toBe(1);
+
+        // 2. Legacy pre-deploy raw-string enc_gh authorization code still exchanges cleanly.
+        const verifier = "legacy-code-verifier-0123456789abcdefghijklmnopqrstuvwxyz";
+        const redirectUri = "http://127.0.0.1:43219/callback";
+        const legacyCode = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          const relayTokens = yield* RelayTokens.RelayTokens;
+          const now = yield* DateTime.now;
+          const iat = Math.floor(now.epochMilliseconds / 1_000);
+          const jti = "legacy-jti-1";
+          const encGh = yield* sessions.sealSecret("gho_legacy_raw", `code:${jti}:t3-cli`);
+          return yield* relayTokens.issueOAuthCodeToken({
+            userId: "github:42",
+            githubLogin: "robert-crandall",
+            encryptedGithubAccessToken: encGh,
+            clientId: "t3-cli",
+            redirectUri,
+            codeChallenge: pkceChallenge(verifier),
+            jti,
+            issuedAtEpochSeconds: iat,
+            expiresAtEpochSeconds: iat + 60,
+          });
+        }).pipe(Effect.provide(layerAuth));
+
+        const legacyExchangeRes = yield* httpEffect.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("https://relay.crandalls.cloud/v1/auth/token", {
+                method: "POST",
+                headers: { "content-type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                  grant_type: "authorization_code",
+                  client_id: "t3-cli",
+                  code: legacyCode,
+                  redirect_uri: redirectUri,
+                  code_verifier: verifier,
+                }),
+              }),
+            ),
+          ),
+        );
+        expect(legacyExchangeRes.status).toBe(200);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

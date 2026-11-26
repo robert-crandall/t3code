@@ -501,4 +501,311 @@ describe("OAuthSessions", () => {
         expect(afterExpiredInspect).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
+
+  it.effect(
+    "seals githubRefreshToken with per-session AAD and clears it across revoke and replay paths",
+    () =>
+      Effect.gen(function* () {
+        const { db, layerAuth, makeLayerAuth } = yield* setupPgliteOAuthTest();
+        const startMs = Date.parse("2026-11-24T12:00:00.000Z");
+        yield* TestClock.setTime(startMs);
+
+        const created = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          const a = yield* sessions.create({
+            userId: "github:1",
+            githubLogin: "alice",
+            clientId: "t3-mobile",
+            githubAccessToken: "gho_alice_1",
+            githubRefreshToken: "ghr_alice_secret",
+          });
+          const b = yield* sessions.create({
+            userId: "github:2",
+            githubLogin: "bob",
+            clientId: "t3-mobile",
+            githubAccessToken: "gho_bob_1",
+            githubRefreshToken: "ghr_bob_secret",
+          });
+          if (a._tag !== "Created" || b._tag !== "Created") {
+            throw new Error("expected Created");
+          }
+          return { a, b };
+        }).pipe(Effect.provide(layerAuth));
+
+        const [rowA] = yield* Effect.promise(() =>
+          db
+            .select()
+            .from(relayOauthSessions)
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const [rowB] = yield* Effect.promise(() =>
+          db
+            .select()
+            .from(relayOauthSessions)
+            .where(eq(relayOauthSessions.id, created.b.sessionId)),
+        );
+        expect(rowA?.encryptedGithubRefreshToken).not.toBeNull();
+        expect(rowA?.encryptedGithubRefreshToken).not.toContain("ghr_alice_secret");
+
+        // Swapping encrypted_github_refresh_token across sessions fails AAD binding on claim.
+        yield* Effect.promise(() =>
+          db
+            .update(relayOauthSessions)
+            .set({ encryptedGithubRefreshToken: rowB!.encryptedGithubRefreshToken })
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const swappedClaim = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.claimGitHubRefresh({
+            sessionId: created.a.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: rowA!.encryptedGithubAccessToken,
+          });
+        }).pipe(Effect.provide(layerAuth));
+        expect(swappedClaim).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // Restore A's ciphertext; rotated secret must also fail closed.
+        yield* Effect.promise(() =>
+          db
+            .update(relayOauthSessions)
+            .set({
+              encryptedGithubRefreshToken: rowA!.encryptedGithubRefreshToken,
+              githubRefreshLeaseUntil: null,
+            })
+            .where(eq(relayOauthSessions.id, created.a.sessionId)),
+        );
+        const wrongKeyClaim = yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          return yield* sessions.claimGitHubRefresh({
+            sessionId: created.a.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: rowA!.encryptedGithubAccessToken,
+          });
+        }).pipe(Effect.provide(makeLayerAuth("gh-rotated-secret")));
+        expect(wrongKeyClaim).toEqual({ _tag: "InvalidGrant", reason: "revoked" });
+
+        // Post-grace replay via inspectForRefresh clears encryptedCurrentRefreshToken,
+        // encryptedGithubRefreshToken, and githubRefreshLeaseUntil.
+        yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          const rotated = yield* sessions.rotate({
+            refreshToken: created.b.refreshToken,
+            clientId: "t3-mobile",
+          });
+          expect(rotated._tag).toBe("Rotated");
+          yield* TestClock.setTime(startMs + 65_000);
+          const replay = yield* sessions.inspectForRefresh({
+            refreshToken: created.b.refreshToken,
+            clientId: "t3-mobile",
+          });
+          expect(replay).toEqual({ _tag: "InvalidGrant", reason: "replayed" });
+        }).pipe(Effect.provide(layerAuth));
+
+        const [revokedRowB] = yield* Effect.promise(() =>
+          db
+            .select()
+            .from(relayOauthSessions)
+            .where(eq(relayOauthSessions.id, created.b.sessionId)),
+        );
+        expect(revokedRowB?.revokedAt).not.toBeNull();
+        expect(revokedRowB?.encryptedCurrentRefreshToken).toBeNull();
+        expect(revokedRowB?.encryptedGithubRefreshToken).toBeNull();
+        expect(revokedRowB?.githubRefreshLeaseUntil).toBeNull();
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect(
+    "coordinates GitHub refresh leases, fences stale releases/rejections, and clears refresh token when omitted",
+    () =>
+      Effect.gen(function* () {
+        const { db, layerAuth } = yield* setupPgliteOAuthTest();
+        const startMs = Date.parse("2026-11-24T12:00:00.000Z");
+        yield* TestClock.setTime(startMs);
+
+        yield* Effect.gen(function* () {
+          const sessions = yield* OAuthSessions.OAuthSessions;
+          const created = yield* sessions.create({
+            userId: "github:42",
+            githubLogin: "octocat",
+            clientId: "t3-mobile",
+            githubAccessToken: "gho_1",
+            githubRefreshToken: "ghr_1",
+          });
+          if (created._tag !== "Created") {
+            throw new Error("expected Created");
+          }
+
+          const inspected = yield* sessions.inspectForRefresh({
+            refreshToken: created.refreshToken,
+            clientId: "t3-mobile",
+          });
+          if (inspected._tag !== "Ready") {
+            throw new Error("expected Ready");
+          }
+          expect(inspected.hasGithubRefreshToken).toBe(true);
+
+          // Worker A claims the lease; Worker B immediately sees InFlight.
+          const claimA = yield* sessions.claimGitHubRefresh({
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: inspected.encryptedGithubAccessToken,
+          });
+          expect(claimA._tag).toBe("Claimed");
+          if (claimA._tag !== "Claimed") {
+            throw new Error("expected Claimed");
+          }
+          expect(claimA.githubRefreshToken).toBe("ghr_1");
+
+          const claimBWhileActive = yield* sessions.claimGitHubRefresh({
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: inspected.encryptedGithubAccessToken,
+          });
+          expect(claimBWhileActive).toEqual({ _tag: "InFlight" });
+
+          // After lease expiry, Worker B can re-claim; Worker A's stale TransientFailure
+          // must NOT release Worker B's newer lease.
+          yield* TestClock.setTime(startMs + OAuthSessions.GITHUB_REFRESH_LEASE_MS + 1_000);
+          const claimB = yield* sessions.claimGitHubRefresh({
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: inspected.encryptedGithubAccessToken,
+          });
+          expect(claimB._tag).toBe("Claimed");
+          if (claimB._tag !== "Claimed") {
+            throw new Error("expected Claimed");
+          }
+
+          const staleRelease = yield* sessions.completeGitHubRefresh({
+            _tag: "TransientFailure",
+            sessionId: created.sessionId,
+            claimedLeaseUntil: claimA.claimedLeaseUntil,
+          });
+          expect(staleRelease).toEqual({ _tag: "Superseded" });
+
+          const stillInFlight = yield* sessions.claimGitHubRefresh({
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: inspected.encryptedGithubAccessToken,
+          });
+          expect(stillInFlight).toEqual({ _tag: "InFlight" });
+
+          // Worker B persists rotated (gho_2, ghr_2).
+          const applied = yield* sessions.completeGitHubRefresh({
+            _tag: "Succeeded",
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubRefreshToken: claimB.expectedEncryptedGithubRefreshToken,
+            githubAccessToken: "gho_2",
+            githubRefreshToken: "ghr_2",
+          });
+          expect(applied).toEqual({ _tag: "Applied" });
+
+          // Worker A's stale Rejected (bad_refresh_token for ghr_1) is Superseded and does NOT revoke.
+          const staleReject = yield* sessions.completeGitHubRefresh({
+            _tag: "Rejected",
+            sessionId: created.sessionId,
+            expectedEncryptedGithubRefreshToken: claimA.expectedEncryptedGithubRefreshToken,
+          });
+          expect(staleReject).toEqual({ _tag: "Superseded" });
+
+          // A caller claiming with the stale gho_1 ciphertext receives AlreadyRefreshed(gho_2).
+          const alreadyRefreshed = yield* sessions.claimGitHubRefresh({
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: inspected.encryptedGithubAccessToken,
+          });
+          expect(alreadyRefreshed).toMatchObject({
+            _tag: "AlreadyRefreshed",
+            githubAccessToken: "gho_2",
+          });
+          if (alreadyRefreshed._tag !== "AlreadyRefreshed") {
+            throw new Error("expected AlreadyRefreshed");
+          }
+
+          // If GitHub returns a replacement access token WITHOUT refresh_token (opted-out app),
+          // consumed ghr_2 is cleared to null rather than retained.
+          const claimC = yield* sessions.claimGitHubRefresh({
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: alreadyRefreshed.encryptedGithubAccessToken,
+          });
+          expect(claimC._tag).toBe("Claimed");
+          if (claimC._tag !== "Claimed") {
+            throw new Error("expected Claimed");
+          }
+          expect(claimC.githubRefreshToken).toBe("ghr_2");
+
+          const clearedRefresh = yield* sessions.completeGitHubRefresh({
+            _tag: "Succeeded",
+            sessionId: created.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubRefreshToken: claimC.expectedEncryptedGithubRefreshToken,
+            githubAccessToken: "gho_non_expiring",
+            githubRefreshToken: null,
+          });
+          expect(clearedRefresh).toEqual({ _tag: "Applied" });
+
+          const afterClear = yield* sessions.inspectForRefresh({
+            refreshToken: created.refreshToken,
+            clientId: "t3-mobile",
+          });
+          expect(afterClear).toMatchObject({
+            _tag: "Ready",
+            githubAccessToken: "gho_non_expiring",
+            hasGithubRefreshToken: false,
+          });
+          if (afterClear._tag !== "Ready") {
+            throw new Error("expected Ready");
+          }
+          expect(
+            yield* sessions.claimGitHubRefresh({
+              sessionId: created.sessionId,
+              clientId: "t3-mobile",
+              expectedEncryptedGithubAccessToken: afterClear.encryptedGithubAccessToken,
+            }),
+          ).toEqual({ _tag: "NoRefreshToken" });
+
+          // Genuine Rejected revokes a session when expectedEncryptedGithubRefreshToken matches.
+          const doomed = yield* sessions.create({
+            userId: "github:99",
+            githubLogin: "doomed",
+            clientId: "t3-mobile",
+            githubAccessToken: "gho_doomed",
+            githubRefreshToken: "ghr_doomed",
+          });
+          if (doomed._tag !== "Created") {
+            throw new Error("expected Created");
+          }
+          const doomedInspected = yield* sessions.inspectForRefresh({
+            refreshToken: doomed.refreshToken,
+            clientId: "t3-mobile",
+          });
+          if (doomedInspected._tag !== "Ready") {
+            throw new Error("expected Ready");
+          }
+          const doomedClaim = yield* sessions.claimGitHubRefresh({
+            sessionId: doomed.sessionId,
+            clientId: "t3-mobile",
+            expectedEncryptedGithubAccessToken: doomedInspected.encryptedGithubAccessToken,
+          });
+          if (doomedClaim._tag !== "Claimed") {
+            throw new Error("expected Claimed");
+          }
+          const rejected = yield* sessions.completeGitHubRefresh({
+            _tag: "Rejected",
+            sessionId: doomed.sessionId,
+            expectedEncryptedGithubRefreshToken: doomedClaim.expectedEncryptedGithubRefreshToken,
+          });
+          expect(rejected).toEqual({ _tag: "Applied" });
+
+          const [doomedRow] = yield* Effect.promise(() =>
+            db.select().from(relayOauthSessions).where(eq(relayOauthSessions.id, doomed.sessionId)),
+          );
+          expect(doomedRow?.revokedAt).not.toBeNull();
+          expect(doomedRow?.encryptedGithubRefreshToken).toBeNull();
+          expect(doomedRow?.githubRefreshLeaseUntil).toBeNull();
+        }).pipe(Effect.provide(layerAuth));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 });
