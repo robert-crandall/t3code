@@ -91,7 +91,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/39696",
       "title": "fix(acp): dev servers an ACP agent starts show under its thread",
       "status": "integrated",
-      "reviewedHeadSha": "823140ac1c7fb5e8fcbf835e0fe7eda8bd18790d",
+      "reviewedHeadSha": "8f6e17be229317b4d004d58d9dc21e34ae561bfb",
       "notes": "Calls host.trackAgent scoped to ACP runtimeScope and replacementScope so PortScanner attributes dev servers started by ACP agents (including Copilot) to their thread."
     },
     {
@@ -133,6 +133,24 @@
       "status": "integrated",
       "reviewedHeadSha": "c14b9d666fb184733fda9dcc6aaa42ef48b928f0",
       "notes": "Maintainer fix (#43336) answering ACP session/request_permission RPCs that race session/cancel after turn settlement with { outcome: \"cancelled\" } instead of JSON-RPC -32603."
+    },
+    {
+      "pr": 35860,
+      "title": "fix(acp): v2 agents that omit authMethods are not sent auth/login",
+      "url": "https://github.com/pingdotgg/t3code/pull/35860",
+      "reviewedHeadSha": "6d316c7517b6307fc4fbe889531a7d2d54195b6f",
+      "forkCommits": ["cd822861bc", "52fee9452c"],
+      "status": "integrated",
+      "notes": "Normalizes omitted ACP v2 authMethods to [] in effect-acp normalizeInitializeResponse (preserving v1-shaped responses from #40017) so v2 agents omitting authMethods are not sent auth/login."
+    },
+    {
+      "pr": 36213,
+      "title": "fix(acp): later model-category selectors stay reachable",
+      "url": "https://github.com/pingdotgg/t3code/pull/36213",
+      "reviewedHeadSha": "df344a86b2d49cb7f708d45a0a60fc41ca581604",
+      "forkCommits": ["d944e6dd28", "59d704412e"],
+      "status": "integrated",
+      "notes": "Skips only findModelConfigOption primary model selector in acpProviderOptionDescriptors so secondary model-category ACP configOptions stay reachable."
     },
     {
       "pr": 33683,
@@ -275,7 +293,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/40010",
       "title": "fix(server): explain provider failures caused by a full disk",
       "status": "skipped",
-      "reviewedHeadSha": "ba3a9f6528f7eb56cd85704aa190b79d690a0165",
+      "reviewedHeadSha": "3cc92eb27a480a8d7a6c276253b2780cb42c2409",
       "skipReason": "Failing CI checks upstream (2 failures) and generic server disk error handling rather than Copilot/ACP."
     },
     {
@@ -459,7 +477,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/40559",
       "title": "fix(acp): keep completed replies visible when background wakes follow in the same run",
       "status": "skipped",
-      "reviewedHeadSha": "4214ad4f37ed5fcffd5e7fdea24d6e2365539382",
+      "reviewedHeadSha": "c7baed212c105debb5199cd1e1f60f2c7143e1b7",
       "skipReason": "Antigravity held-open multi-wake / replyEndsWithUsageUpdate folding change (+532/-53); Copilot ACP uses separate continuation turns rather than held-open replyEndsWithUsageUpdate wakes."
     },
     {
@@ -467,7 +485,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/43400",
       "title": "fix(acp): isolate session/load replays and scope tool item IDs per turn",
       "status": "skipped",
-      "reviewedHeadSha": "66ca716622d60b3199616ab028254c44da533f92",
+      "reviewedHeadSha": "7b138df7f83f9653f529b0a173b3a22845b8f12f",
       "skipReason": "Large invasive refactor (+1477/-124, takeover:blocked) across AcpSessionRuntime and AcpAdapterV2 with multiple unresolved Major/P2 review defects on replay quarantine, detached commands, and session/cancel."
     },
     {
@@ -475,7 +493,7 @@
       "url": "https://github.com/pingdotgg/t3code/pull/43075",
       "title": "fix(server): Antigravity helper processes run in an auth-only profile",
       "status": "skipped",
-      "reviewedHeadSha": "0dca3815ff467504d2b035750035b9b42b28f8f9",
+      "reviewedHeadSha": "792638dd61157be9a5b6fdbf8ca434d3f22b7d70",
       "skipReason": "Antigravity-only helper profile isolation (+373/-41) unrelated to Copilot ACP (Copilot text generation already uses isolated COPILOT_HOME via #32976)."
     },
     {
@@ -485,6 +503,175 @@
       "status": "skipped",
       "reviewedHeadSha": "5dc12331d0c3d481a00f22f5b31ed97e684b8f53",
       "skipReason": "Unvouched (+475/-59) watchPromptOutcome resumeWith state-machine change with 3 unresolved Major review findings on terminal settlement and unacknowledged steers."
+    },
+    {
+      "pr": 44206,
+      "title": "fix(server): a cancelled ACP turn start no longer strands the session",
+      "url": "https://github.com/pingdotgg/t3code/pull/44206",
+      "reviewedHeadSha": "97a0f7a42362a6443d69b8059ab1446bc2cdad1d",
+      "status": "skipped",
+      "skipReason": "Unvouched <1-day-old PR with 2 unresolved concurrency review defects (finalizeInterruptedStart ignores cancelAfterPromptStarts hold semantics, and sendPromptWhenIdle interruption check races prompt registration on promptSerializationSemaphore)."
+    },
+    {
+      "pr": 43675,
+      "title": "fix(antigravity): isolate per-session app-data directories so concurrent threads stop resuming each other",
+      "url": "https://github.com/pingdotgg/t3code/pull/43675",
+      "reviewedHeadSha": "a58dd5e4f4704924c9b9fa96a695da1370ad2876",
+      "status": "skipped",
+      "skipReason": "Large (+2540/-202, takeover:blocked) Antigravity-only app-data directory isolation unrelated to Copilot ACP."
+    },
+    {
+      "pr": 43728,
+      "title": "fix(server): stop injecting fake SSH_CONNECTION into Antigravity 1.5.17+ sessions",
+      "url": "https://github.com/pingdotgg/t3code/pull/43728",
+      "reviewedHeadSha": "5fb45d434df2b254a021417408dbda50ab257489",
+      "status": "skipped",
+      "skipReason": "Antigravity 1.5.17+ SSH_CONNECTION workaround (takeover:blocked) unrelated to Copilot ACP."
+    },
+    {
+      "pr": 41982,
+      "title": "fix(server): Antigravity 1.5.16 Google sign-ins stay in profile storage",
+      "url": "https://github.com/pingdotgg/t3code/pull/41982",
+      "reviewedHeadSha": "02f8fd0c52686742b3cd528b29b252095dbab08f",
+      "status": "skipped",
+      "skipReason": "Antigravity 1.5.16 Google sign-in profile storage workaround (takeover:blocked) unrelated to Copilot ACP."
+    },
+    {
+      "pr": 39452,
+      "title": "fix(server): pause Antigravity prompt inactivity timeout during live schedule timers",
+      "url": "https://github.com/pingdotgg/t3code/pull/39452",
+      "reviewedHeadSha": "734ab1e7aa56d9d5eb76e830f2704e0f049b465b",
+      "status": "skipped",
+      "skipReason": "Large (+863/-0) Antigravity-only schedule timer inactivity timeout change unrelated to Copilot ACP."
+    },
+    {
+      "pr": 39450,
+      "title": "fix(server): reconcile canceled Antigravity background commands at turn settlement",
+      "url": "https://github.com/pingdotgg/t3code/pull/39450",
+      "reviewedHeadSha": "902703d643ca3ba73884be1c591bc557206bb0e2",
+      "status": "skipped",
+      "skipReason": "Conflicting (+1017/-2) Antigravity-only background command settlement refactor unrelated to Copilot ACP."
+    },
+    {
+      "pr": 37119,
+      "title": "fix(server): Antigravity ask_question asks each choice once with its free-form answer",
+      "url": "https://github.com/pingdotgg/t3code/pull/37119",
+      "reviewedHeadSha": "407e45bde986b66ec0f54de5e9d916420e0939f9",
+      "status": "skipped",
+      "skipReason": "Conflicting Antigravity-only ask_question fix unrelated to Copilot ACP."
+    },
+    {
+      "pr": 43150,
+      "title": "fix(acp): a steered Antigravity turn keeps the answer to the earlier prompt visible",
+      "url": "https://github.com/pingdotgg/t3code/pull/43150",
+      "reviewedHeadSha": "b67a6dc9f9a23a9fa20e0d4a46c8e454a1be7b78",
+      "status": "skipped",
+      "skipReason": "Antigravity steersWithPrompt final_answer heuristic with unresolved review feedback; Copilot ACP does not use steersWithPrompt."
+    },
+    {
+      "pr": 42978,
+      "title": "fix(acp): cancel a prompt left waiting on an answer before starting the next turn",
+      "url": "https://github.com/pingdotgg/t3code/pull/42978",
+      "reviewedHeadSha": "273b0503e0690f74a34a946af9e427e5a0de7065",
+      "status": "skipped",
+      "skipReason": "Antigravity steersWithPrompt prompt-retry workaround (+376/-4, <3 days old); Copilot ACP does not use steersWithPrompt."
+    },
+    {
+      "pr": 40484,
+      "title": "fix(acp): fail open post-settle replies and cancel pending requests on agent exit",
+      "url": "https://github.com/pingdotgg/t3code/pull/40484",
+      "reviewedHeadSha": "8d4c3b48f560e49b0305173d7c3024fb587236a5",
+      "status": "skipped",
+      "skipReason": "Antigravity-only flavor.toolOutlivesPrompt exit cleanup unrelated to Copilot ACP."
+    },
+    {
+      "pr": 42610,
+      "title": "fix(acp): preserve Grok context usage on wake replay",
+      "url": "https://github.com/pingdotgg/t3code/pull/42610",
+      "reviewedHeadSha": "24b5102742acdebb270958585b182c7b19412799",
+      "status": "skipped",
+      "skipReason": "Grok-only flavor.extractContextUsage wake-replay workaround unrelated to Copilot ACP."
+    },
+    {
+      "pr": 42645,
+      "title": "perf(provider): slim and gate injected T3 agent instructions",
+      "url": "https://github.com/pingdotgg/t3code/pull/42645",
+      "reviewedHeadSha": "5ebed81470b5c7742e57770dc774d2c752b1b27a",
+      "status": "skipped",
+      "skipReason": "Conflicting cross-provider instruction gating refactor (+574/-151) with 4 failing CI suites and 3 unresolved review comments."
+    },
+    {
+      "pr": 40407,
+      "title": "fix(antigravity): a long turn is no longer stopped after 15 minutes",
+      "url": "https://github.com/pingdotgg/t3code/pull/40407",
+      "reviewedHeadSha": "492fcd4027556173ca5b642da928901db783553e",
+      "status": "skipped",
+      "skipReason": "Antigravity-only 15-minute turn timeout change unrelated to Copilot ACP."
+    },
+    {
+      "pr": 29800,
+      "title": "fix(grok): failed Grok text generation explains usage limit, sign-in, and model errors",
+      "url": "https://github.com/pingdotgg/t3code/pull/29800",
+      "reviewedHeadSha": "313fa620545659337d35a71a79d15be2b3c2704e",
+      "status": "skipped",
+      "skipReason": "Grok-only text generation error formatting unrelated to Copilot ACP."
+    },
+    {
+      "pr": 43217,
+      "title": "fix(server): show Antigravity invalid stream chunk errors on failed turns",
+      "url": "https://github.com/pingdotgg/t3code/pull/43217",
+      "reviewedHeadSha": "266e7b4096e3cb3281d778c8b68ebac9e9ad2637",
+      "status": "skipped",
+      "skipReason": "Antigravity-only invalid stream chunk error formatting unrelated to Copilot ACP."
+    },
+    {
+      "pr": 39083,
+      "title": "fix(server): Antigravity can read a linked worktree's own Git directory",
+      "url": "https://github.com/pingdotgg/t3code/pull/39083",
+      "reviewedHeadSha": "76618f190226341a3f289f51b7dd90832df7c3d0",
+      "status": "skipped",
+      "skipReason": "Antigravity-only linked worktree Git directory mount unrelated to Copilot ACP."
+    },
+    {
+      "pr": 26236,
+      "title": "feat(providers): allow per-instance icons",
+      "url": "https://github.com/pingdotgg/t3code/pull/26236",
+      "reviewedHeadSha": "11656e1b5aaac605897ab99cf12d3965f213c0c6",
+      "status": "skipped",
+      "skipReason": "Conflicting cross-cutting UI/provider icon feature (+641/-93, needs-rebase)."
+    },
+    {
+      "pr": 35152,
+      "title": "fix(clients): complete advertised ACP skills inside prompts",
+      "url": "https://github.com/pingdotgg/t3code/pull/35152",
+      "reviewedHeadSha": "65f143f1bfa258e62b21d92f7b1f4860498dfbe0",
+      "status": "skipped",
+      "skipReason": "Conflicting web/mobile skill:-prefix autocomplete UI change (needs-rebase); Copilot skills already surface via #26438."
+    },
+    {
+      "pr": 39031,
+      "title": "fix(server): Kimi turns that end before Kimi's work no longer settle as completed",
+      "url": "https://github.com/pingdotgg/t3code/pull/39031",
+      "reviewedHeadSha": "8437ac41b179d92df17ab42c7260bd1e165032c8",
+      "status": "skipped",
+      "skipReason": "Conflicting Kimi-only turn settlement change (+535/-179) unrelated to Copilot ACP."
+    },
+    {
+      "pr": 34892,
+      "title": "fix(acp): Kimi CLI sign-in opens its login terminal",
+      "url": "https://github.com/pingdotgg/t3code/pull/34892",
+      "reviewedHeadSha": "626426406aa04651968f5f0081741ac1fa36b644",
+      "status": "skipped",
+      "skipReason": "Kimi CLI login terminal fix unrelated to Copilot ACP."
+    },
+    {
+      "pr": 40447,
+      "title": "fix(server): Antigravity subagents in Full access no longer time out on hidden permission prompts",
+      "url": "https://github.com/pingdotgg/t3code/pull/40447",
+      "reviewedHeadSha": "59a51229cde5588c5ef45848a0d2d708e0ff4a95",
+      "status": "skipped",
+      "skipReason": "Antigravity-only subagent permission prompt workaround (takeover:blocked) unrelated to Copilot ACP."
     }
-  ]
+  ],
+  "lastAuditedAt": "2026-11-27T17:15:00Z"
 }
