@@ -672,47 +672,44 @@ function normalizeInitializeResponse(
         ? {}
         : { auth: { logout: {} } }),
     },
-    ...(response.authMethods === undefined
-      ? {}
-      : {
-          authMethods: response.authMethods
-            .map((method) => {
-              const record = method as AcpSchemaV2.AuthMethod;
-              const base = {
-                id: record.methodId,
-                name: record.name,
-                ...(record.description === undefined ? {} : { description: record.description }),
-                ...(record._meta === undefined ? {} : { _meta: record._meta }),
-              };
-              if (record.type === "env_var") {
-                return normalizeEnvVarAuthMethod(base, record.vars, record.link);
+    // v2 defines an omitted authMethods list as no authentication, the same as an empty one.
+    authMethods: (response.authMethods ?? [])
+      .map((method) => {
+        const record = method as AcpSchemaV2.AuthMethod;
+        const base = {
+          id: record.methodId,
+          name: record.name,
+          ...(record.description === undefined ? {} : { description: record.description }),
+          ...(record._meta === undefined ? {} : { _meta: record._meta }),
+        };
+        if (record.type === "env_var") {
+          return normalizeEnvVarAuthMethod(base, record.vars, record.link);
+        }
+        if (record.type === "agent") return { ...base, type: "agent" as const };
+        if (record.type !== "terminal") return undefined;
+        return {
+          ...base,
+          type: "terminal" as const,
+          ...(Array.isArray(record.args)
+            ? {
+                args: record.args.filter(
+                  (argument): argument is string => typeof argument === "string",
+                ),
               }
-              if (record.type === "agent") return { ...base, type: "agent" as const };
-              if (record.type !== "terminal") return undefined;
-              return {
-                ...base,
-                type: "terminal" as const,
-                ...(Array.isArray(record.args)
-                  ? {
-                      args: record.args.filter(
-                        (argument): argument is string => typeof argument === "string",
-                      ),
-                    }
-                  : {}),
-                ...(Array.isArray(record.env)
-                  ? {
-                      env: Object.fromEntries(
-                        (record.env as ReadonlyArray<AcpSchemaV2.EnvVariable>).map((variable) => [
-                          variable.name,
-                          variable.value,
-                        ]),
-                      ),
-                    }
-                  : {}),
-              };
-            })
-            .filter(Predicate.isNotUndefined),
-        }),
+            : {}),
+          ...(Array.isArray(record.env)
+            ? {
+                env: Object.fromEntries(
+                  (record.env as ReadonlyArray<AcpSchemaV2.EnvVariable>).map((variable) => [
+                    variable.name,
+                    variable.value,
+                  ]),
+                ),
+              }
+            : {}),
+        };
+      })
+      .filter(Predicate.isNotUndefined),
     ...(response._meta === undefined ? {} : { _meta: response._meta }),
   };
 }
