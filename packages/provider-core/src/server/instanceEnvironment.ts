@@ -11,13 +11,15 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
 ) {
   // Commands the agent runs inherit this env; the AppImage mount's libraries would shadow the system's.
   const hostEnv = stripAppImageRuntimeEnv(baseEnv);
+  // The desktop runs the server as Node; inherited, it makes Electron apps agents launch exit.
+  // Undefined, not omitted: spawns with `extendEnv` would merge the server's value back in.
+  const next: NodeJS.ProcessEnv = { ...hostEnv, ELECTRON_RUN_AS_NODE: undefined };
   if (!environment || environment.length === 0) {
-    return hostEnv;
+    return next;
   }
 
   const home = yield* HostProcess.HomeDirectory;
   const windows = (yield* HostProcess.Platform) === "win32";
-  const next: NodeJS.ProcessEnv = { ...hostEnv };
   for (const variable of environment) {
     // An unresolved secret reference carries no value; the registry resolves it for the provider.
     if (typeof variable.value !== "string") continue;
