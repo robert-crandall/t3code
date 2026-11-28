@@ -294,7 +294,7 @@
       "title": "fix(server): explain provider failures caused by a full disk",
       "status": "skipped",
       "reviewedHeadSha": "4c90b3d1320d83eacdcefa34cd04b141844c2d51",
-      "skipReason": "Unvouched ACP prompt delivery refactor with failing Test Server 5 and Check CI suites."
+      "skipReason": "Generic server disk-full error classification with failing Test Server 5 and Check CI suites."
     },
     {
       "pr": 41289,
@@ -381,8 +381,8 @@
       "url": "https://github.com/pingdotgg/t3code/pull/42101",
       "title": "fix(provider-acp): merge per-turn PromptResponse usage into contextUsage",
       "status": "skipped",
-      "reviewedHeadSha": "524a6bc63781cf3785fb8be311d38e431b3abb68",
-      "skipReason": "Unvouched ACP terminal resize PR with failing Lint CI check."
+      "reviewedHeadSha": "cf5a66a2688a71751f83d6451e90fdec50963871",
+      "skipReason": "Unvouched Antigravity per-turn PromptResponse usage merge with open Functional Correctness / Data Integrity review findings in adapter.ts."
     },
     {
       "pr": 42195,
@@ -516,7 +516,7 @@
       "pr": 43675,
       "title": "fix(antigravity): isolate per-session app-data directories so concurrent threads stop resuming each other",
       "url": "https://github.com/pingdotgg/t3code/pull/43675",
-      "reviewedHeadSha": "a58dd5e4f4704924c9b9fa96a695da1370ad2876",
+      "reviewedHeadSha": "a58dd5e4f48140b9fb709d951a0af647d88d6b93",
       "status": "skipped",
       "skipReason": "Large (+2540/-202, takeover:blocked) Antigravity-only app-data directory isolation unrelated to Copilot ACP."
     },
@@ -570,11 +570,11 @@
     },
     {
       "pr": 42978,
-      "title": "fix(acp): cancel a prompt left waiting on an answer before starting the next turn",
+      "title": "fix(acp): a pending question no longer jams the session when a delegated task finishes",
       "url": "https://github.com/pingdotgg/t3code/pull/42978",
       "reviewedHeadSha": "7668e08712804f7521ad743cc70491b69774d726",
       "status": "skipped",
-      "skipReason": "Unvouched large ACP slash-command refactor (+887/-40) touching Orchestrator.ts and adapter.ts."
+      "skipReason": "Unvouched large (+887/-40) steersWithPrompt delegated-task question refactor across Orchestrator.ts and adapter.ts; Copilot ACP does not use steersWithPrompt."
     },
     {
       "pr": 40484,
@@ -714,5 +714,5 @@
       "skipReason": "Passes --dangerously-allow-all-scripts to npm 12 global installs (flagged Needs Human Approval for supply-chain risk and Major review finding on npm_config_prefix hiding global npmrc script policy); Copilot CLI does not rely on npm 12 global install scripts."
     }
   ],
-  "lastAuditedAt": "2026-11-28T15:20:32Z"
+  "lastAuditedAt": "2026-11-28T15:22:28Z"
 }
